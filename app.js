@@ -112,15 +112,25 @@
   const state = loadState();
   let balanceDisplay = state.bankBalance;
   let auth = null;
+  let db = null;
+  let currentUid = null;
   let firebaseReady = false;
   let gameStarted = false;
   let tick1sHandle = null;
   let tick30sHandle = null;
+  let saveTimer = null;
+  let saveInFlight = false;
+  let cloudDirty = false;
   let firebaseApi = {
     onAuthStateChanged: null,
     createUserWithEmailAndPassword: null,
     signInWithEmailAndPassword: null,
-    signOut: null
+    signOut: null,
+    doc: null,
+    getDoc: null,
+    setDoc: null,
+    updateDoc: null,
+    serverTimestamp: null
   };
 
   function getDefaultState() {
@@ -187,6 +197,68 @@
 
   function saveState() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    scheduleCloudSave();
+  }
+
+  function replaceState(next) {
+    const fresh = { ...getDefaultState(), ...(next || {}) };
+    fresh.skills = { efficiency: 0, speed: 0, luck: 0, charisma: 0, ...(next?.skills || {}) };
+    fresh.casinoStats = { wins: 0, losses: 0, ...(next?.casinoStats || {}) };
+    fresh.ownedBusinesses = next?.ownedBusinesses || {};
+    Object.keys(state).forEach((k) => delete state[k]);
+    Object.assign(state, fresh);
+  }
+
+  async function loadCloudState(uid) {
+    if (!firebaseReady || !uid) return;
+    const userRef = firebaseApi.doc(db, "users", uid);
+    const snap = await firebaseApi.getDoc(userRef);
+    if (!snap.exists()) {
+      await firebaseApi.setDoc(
+        userRef,
+        {
+          createdAt: firebaseApi.serverTimestamp(),
+          updatedAt: firebaseApi.serverTimestamp(),
+          gameState: state
+        },
+        { merge: true }
+      );
+      return;
+    }
+    const data = snap.data() || {};
+    if (data.gameState) {
+      replaceState(data.gameState);
+      balanceDisplay = state.bankBalance;
+    }
+  }
+
+  async function flushCloudSave() {
+    if (!firebaseReady || !currentUid || !cloudDirty || saveInFlight) return;
+    saveInFlight = true;
+    cloudDirty = false;
+    try {
+      const userRef = firebaseApi.doc(db, "users", currentUid);
+      await firebaseApi.setDoc(
+        userRef,
+        {
+          updatedAt: firebaseApi.serverTimestamp(),
+          gameState: state
+        },
+        { merge: true }
+      );
+    } catch {
+      cloudDirty = true;
+    } finally {
+      saveInFlight = false;
+      if (cloudDirty) scheduleCloudSave();
+    }
+  }
+
+  function scheduleCloudSave() {
+    if (!firebaseReady || !currentUid) return;
+    cloudDirty = true;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(flushCloudSave, 600);
   }
 
   function fmtMoney(v) {
@@ -301,12 +373,18 @@
         return;
       }
       auth = result.auth;
+      db = result.db;
       firebaseReady = true;
       firebaseApi = {
         onAuthStateChanged: mod.onAuthStateChanged,
         createUserWithEmailAndPassword: mod.createUserWithEmailAndPassword,
         signInWithEmailAndPassword: mod.signInWithEmailAndPassword,
-        signOut: mod.signOut
+        signOut: mod.signOut,
+        doc: mod.doc,
+        getDoc: mod.getDoc,
+        setDoc: mod.setDoc,
+        updateDoc: mod.updateDoc,
+        serverTimestamp: mod.serverTimestamp
       };
       dom.setupMessage.textContent = "";
     } catch (err) {
@@ -314,16 +392,24 @@
     }
   }
 
-  function handleAuthState(user) {
+  async function handleAuthState(user) {
     if (!user) {
+      currentUid = null;
       showAuthScreen();
       dom.whoami.textContent = "";
       return;
+    }
+    currentUid = user.uid;
+    try {
+      await loadCloudState(user.uid);
+    } catch {
+      // keep local state if cloud load fails
     }
     const uname = user.email ? user.email.split("@")[0] : "Player";
     dom.whoami.textContent = `Signed in as ${uname}`;
     showGameScreen();
     if (!gameStarted) startGame();
+    else render();
   }
 
   function fmtDur(ms) {
@@ -1033,8 +1119,6 @@
     renderOpportunity(now);
     renderSpend(now);
     renderLog();
-
-    saveState();
   }
 
   function tick1s() {
