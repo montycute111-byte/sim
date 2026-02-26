@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fake Bank Account Simulator</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="authOverlay" class="auth-overlay">
+    <div class="auth-card">
+      <h2>Sign In</h2>
+      <p class="small">Create an account or sign in to load your progress.</p>
+      <label class="auth-label" for="authUsername">Username</label>
+      <input id="authUsername" type="text" maxlength="24" autocomplete="username" />
+      <label class="auth-label" for="authPassword">Password</label>
+      <input id="authPassword" type="password" maxlength="64" autocomplete="current-password" />
+      <p id="authMessage" class="small auth-message"></p>
+      <div class="row-between top-gap">
+        <button id="loginBtn" class="btn">Sign In</button>
+        <button id="signupBtn" class="btn btn-secondary">Create Account</button>
+      </div>
+    </div>
+  </div>
+
+  <main class="app">
+    <header class="card hero">
+      <div>
+        <p class="eyebrow">Fake Bank Account Simulator</p>
+        <h1 id="balanceDisplay">$0</h1>
+      </div>
+      <div class="hero-actions">
+        <span id="accountBadge" class="tag locked">Not signed in</span>
+        <button id="navBankBtn" class="btn">Bank</button>
+        <button id="navSpendBtn" class="btn btn-secondary">Spend</button>
+        <button id="logoutBtn" class="btn btn-secondary">Log Out</button>
+        <button id="resetBtn" class="btn btn-danger">Reset Save</button>
+      </div>
+    </header>
+
+    <section id="bankView" class="view active">
+      <section class="grid dashboard-grid">
+        <article class="card">
+          <h2>Progress</h2>
+          <div class="stat-row"><span>Level</span><strong id="levelDisplay">1</strong></div>
+          <div class="stat-row"><span>Reputation</span><strong id="reputationDisplay">0</strong></div>
+          <div class="xp-wrap">
+            <div class="xp-label"><span>XP</span><span id="xpText">0 / 40</span></div>
+            <div class="xp-bar"><div id="xpFill" class="xp-fill"></div></div>
+          </div>
+          <p class="small top-gap" id="activeEffectsSummary"></p>
+        </article>
+
+        <article class="card">
+          <h2>Streak</h2>
+          <p id="streakStatus" class="small">Streak: 0 (+0%)</p>
+          <p id="streakTimer" class="muted">No active streak window.</p>
+        </article>
+
+        <article class="card">
+          <h2>Daily + Interest</h2>
+          <p id="dailyStatus" class="muted">Checking daily bonus...</p>
+          <button id="dailyBtn" class="btn">Claim Daily Bonus</button>
+          <p id="interestStatus" class="muted top-gap">Checking interest...</p>
+          <button id="interestBtn" class="btn">Apply Interest</button>
+        </article>
+      </section>
+
+      <section class="grid content-grid">
+        <article class="card">
+          <h2>Main Job</h2>
+          <div id="activeJobCard" class="active-job empty"><p>No active main job.</p></div>
+        </article>
+
+        <article class="card">
+          <div class="row-between">
+            <h2>Job Board</h2>
+            <label class="toggle">
+              <input id="riskyToggle" type="checkbox" />
+              <span>Show risky jobs</span>
+            </label>
+          </div>
+          <p id="cooldownStatus" class="muted"></p>
+          <div id="jobBoard" class="job-list"></div>
+        </article>
+      </section>
+
+      <section class="grid aux-grid">
+        <article class="card">
+          <h2>Quick Tasks</h2>
+          <p id="quickQuotaStatus" class="small"></p>
+          <div id="quickTaskActive" class="active-job empty"><p>No active quick task.</p></div>
+          <div id="quickTaskBoard" class="job-list top-gap"></div>
+        </article>
+
+        <article class="card">
+          <h2>Opportunities</h2>
+          <div id="opportunityPanel" class="active-job empty"><p>No flash contract right now.</p></div>
+        </article>
+      </section>
+
+      <section class="card">
+        <div class="row-between">
+          <h2>Transaction Log</h2>
+          <small class="muted">Showing latest 10 (stores 25)</small>
+        </div>
+        <div id="txLog" class="tx-list"></div>
+      </section>
+    </section>
+
+    <section id="spendView" class="view">
+      <section class="grid spend-grid">
+        <article class="card">
+          <h2>Spend Categories</h2>
+          <div id="spendFilters" class="filter-row"></div>
+          <div id="spendCards" class="shop-grid"></div>
+        </article>
+
+        <article class="card">
+          <h2>Inventory / Active Effects</h2>
+          <div id="inventoryPanel" class="inventory-list"></div>
+        </article>
+
+        <article class="card">
+          <h2>Skills & Training</h2>
+          <p id="trainingCostText" class="small"></p>
+          <div class="row-between top-gap">
+            <button id="buyTrainingBtn" class="btn">Buy +1 Skill Point</button>
+            <strong id="skillPointsDisplay">Skill Points: 0</strong>
+          </div>
+          <div id="skillsPanel" class="skills-grid"></div>
+        </article>
+
+        <article class="card">
+          <h2>Coin Flip</h2>
+          <p id="coinFlipMaxBet" class="small"></p>
+          <input id="coinFlipBetInput" type="number" min="10" step="10" value="100" />
+          <div class="row-between top-gap">
+            <button id="coinHeadsBtn" class="btn">Bet Heads</button>
+            <button id="coinTailsBtn" class="btn">Bet Tails</button>
+          </div>
+          <p id="coinFlipResult" class="small top-gap"></p>
+          <p id="casinoStats" class="small"></p>
+        </article>
+
+        <article class="card">
+          <h2>Bills</h2>
+          <div id="billsPanel" class="bill-list"></div>
+        </article>
+      </section>
+    </section>
+
+    <div id="confettiRoot" class="confetti-root" aria-hidden="true"></div>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
