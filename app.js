@@ -121,6 +121,7 @@
   let saveTimer = null;
   let saveInFlight = false;
   let cloudDirty = false;
+  let queuedImmediateFlush = false;
   let firebaseApi = {
     onAuthStateChanged: null,
     createUserWithEmailAndPassword: null,
@@ -258,7 +259,14 @@
     if (!firebaseReady || !currentUid) return;
     cloudDirty = true;
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(flushCloudSave, 600);
+    saveTimer = setTimeout(flushCloudSave, 150);
+    if (!queuedImmediateFlush) {
+      queuedImmediateFlush = true;
+      queueMicrotask(async () => {
+        queuedImmediateFlush = false;
+        await flushCloudSave();
+      });
+    }
   }
 
   function fmtMoney(v) {
@@ -1187,6 +1195,14 @@
     await initFirebaseServices();
     if (!firebaseReady) return;
     firebaseApi.onAuthStateChanged(auth, handleAuthState);
+    window.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") {
+        flushCloudSave();
+      }
+    });
+    window.addEventListener("beforeunload", () => {
+      flushCloudSave();
+    });
   }
 
   init();
