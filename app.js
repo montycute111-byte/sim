@@ -1,6 +1,9 @@
 (() => {
   const STORAGE_KEY = "fakebank_state_v1";
+  const LOCAL_USER_KEY = "fakebank_local_user";
   const REQUIRED_FIREBASE_KEYS = ["apiKey", "authDomain", "projectId", "appId"];
+
+  const SCHEMA_VERSION = 2;
   const XP_PER_LEVEL_BASE = 40;
   const MAIN_COOLDOWN_MS = 5 * 60 * 1000;
   const QUICK_WINDOW_MS = 5 * 60 * 1000;
@@ -26,11 +29,52 @@
     { id: "support", name: "Customer Support Reply", durationSec: 50, basePay: 45 }
   ];
 
-  const BOOSTS = [
-    { id: "focus", name: "Work Focus", baseCost: 2500, durationMs: 5 * 60 * 1000, desc: "+15% payout" },
-    { id: "drink", name: "Energy Drink", baseCost: 3000, durationMs: 5 * 60 * 1000, desc: "-15% duration" },
-    { id: "charm", name: "Lucky Charm", baseCost: 4000, durationMs: 5 * 60 * 1000, desc: "Better risky odds" }
+  const BOOST_SHOP = [
+    { id: "focus", name: "Work Focus", baseCost: 2500, type: "moneyMultiplier", value: 0.15, durationMs: 5 * 60 * 1000 },
+    { id: "drink", name: "Energy Drink", baseCost: 3000, type: "cooldownReduction", value: 0.15, durationMs: 5 * 60 * 1000 },
+    { id: "charm", name: "Lucky Charm", baseCost: 4000, type: "luckBonus", value: 0.10, durationMs: 5 * 60 * 1000 }
   ];
+
+  const ITEM_CATALOG = [
+    {
+      id: "energy_drink",
+      name: "Energy Drink",
+      price: 120,
+      description: "Cuts cooldown and duration for a short burst.",
+      maxStack: 25,
+      icon: "⚡",
+      boost: { type: "cooldownReduction", value: 0.12, durationMs: 3 * 60 * 1000 }
+    },
+    {
+      id: "coffee",
+      name: "Premium Coffee",
+      price: 180,
+      description: "Boosts payout multiplier for 4 minutes.",
+      maxStack: 25,
+      icon: "☕",
+      boost: { type: "moneyMultiplier", value: 0.10, durationMs: 4 * 60 * 1000 }
+    },
+    {
+      id: "protein_bar",
+      name: "Protein Bar",
+      price: 260,
+      description: "Adds payout bonus for next 4 payout events.",
+      maxStack: 20,
+      icon: "🍫",
+      boost: { type: "payoutBonusNextN", value: 0.08, durationMs: 20 * 60 * 1000, remainingUses: 4 }
+    },
+    {
+      id: "lucky_coin",
+      name: "Lucky Coin",
+      price: 340,
+      description: "Improves risky outcome odds for 6 minutes.",
+      maxStack: 15,
+      icon: "🪙",
+      boost: { type: "luckBonus", value: 0.08, durationMs: 6 * 60 * 1000 }
+    }
+  ];
+
+  const CARRIERS = ["USPS", "UPS", "FedEx", "DHL", "MegaShip"];
 
   const BUSINESSES = [
     { id: "lemonade", name: "Lemonade Stand", baseCost: 10000, intervalMs: 10 * 60 * 1000, basePayout: 50 },
@@ -47,6 +91,7 @@
     passwordInput: document.getElementById("passwordInput"),
     loginBtn: document.getElementById("loginBtn"),
     signupBtn: document.getElementById("signupBtn"),
+    guestBtn: document.getElementById("guestBtn"),
     logoutBtn: document.getElementById("logoutBtn"),
     whoami: document.getElementById("whoami"),
     authError: document.getElementById("authError"),
@@ -54,8 +99,18 @@
 
     tabBankBtn: document.getElementById("tabBankBtn"),
     tabSpendBtn: document.getElementById("tabSpendBtn"),
+    tabStoreBtn: document.getElementById("tabStoreBtn"),
+    tabInventoryBtn: document.getElementById("tabInventoryBtn"),
+    tabOrdersBtn: document.getElementById("tabOrdersBtn"),
+
     bankTab: document.getElementById("bankTab"),
     spendTab: document.getElementById("spendTab"),
+    storeTab: document.getElementById("storeTab"),
+    inventoryTab: document.getElementById("inventoryTab"),
+    ordersTab: document.getElementById("ordersTab"),
+
+    saveStatus: document.getElementById("saveStatus"),
+    saveNowBtn: document.getElementById("saveNowBtn"),
     resetSaveBtn: document.getElementById("resetSaveBtn"),
 
     balanceText: document.getElementById("balanceText"),
@@ -91,14 +146,11 @@
     txLog: document.getElementById("txLog"),
 
     boostStatus: document.getElementById("boostStatus"),
-    boostTimer: document.getElementById("boostTimer"),
     boostShop: document.getElementById("boostShop"),
-
     skillPointText: document.getElementById("skillPointText"),
     trainingCostText: document.getElementById("trainingCostText"),
     buyTrainingBtn: document.getElementById("buyTrainingBtn"),
     skillsPanel: document.getElementById("skillsPanel"),
-
     businessPanel: document.getElementById("businessPanel"),
 
     coinBetInput: document.getElementById("coinBetInput"),
@@ -106,22 +158,37 @@
     coinFlipHint: document.getElementById("coinFlipHint"),
     coinFlipStats: document.getElementById("coinFlipStats"),
 
+    storeList: document.getElementById("storeList"),
+    inventoryList: document.getElementById("inventoryList"),
+    activeBoostList: document.getElementById("activeBoostList"),
+    effectiveModsText: document.getElementById("effectiveModsText"),
+    ordersList: document.getElementById("ordersList"),
+    trackPanel: document.getElementById("trackPanel"),
+
+    toast: document.getElementById("toast"),
     confettiLayer: document.getElementById("confettiLayer")
   };
 
-  const state = loadState();
+  const state = loadLocalState();
+  let selectedTrackOrderId = null;
   let balanceDisplay = state.bankBalance;
+  let gameStarted = false;
+
   let auth = null;
   let db = null;
   let currentUid = null;
   let firebaseReady = false;
-  let gameStarted = false;
+  let localAuthMode = false;
+
   let tick1sHandle = null;
   let tick30sHandle = null;
   let saveTimer = null;
   let saveInFlight = false;
   let cloudDirty = false;
-  let queuedImmediateFlush = false;
+
+  let purchaseLock = false;
+  const orderClaimLocks = new Set();
+
   let firebaseApi = {
     onAuthStateChanged: null,
     createUserWithEmailAndPassword: null,
@@ -134,9 +201,60 @@
     serverTimestamp: null
   };
 
+  function randInt(min, max) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+  }
+
+  function uniqueId(prefix) {
+    const n = crypto && crypto.getRandomValues ? crypto.getRandomValues(new Uint32Array(2)) : [Date.now(), Math.floor(Math.random() * 1e9)];
+    return `${prefix}_${n[0].toString(36)}${n[1].toString(36)}`;
+  }
+
+  function trackingNumber() {
+    let digits = "";
+    for (let i = 0; i < 10; i += 1) digits += String(randInt(0, 9));
+    return `MS${digits}`;
+  }
+
+  function fmtMoney(v) {
+    return `$${Math.max(0, Math.floor(v)).toLocaleString()}`;
+  }
+
+  function fmtDur(ms) {
+    if (!Number.isFinite(ms) || ms <= 0) return "00:00";
+    const total = Math.floor(ms / 1000);
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    if (h > 0) return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+    return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  }
+
+  function fmtTs(ts) {
+    return ts ? new Date(ts).toLocaleString() : "--";
+  }
+
+  function toast(msg) {
+    if (!dom.toast) return;
+    dom.toast.textContent = msg;
+    dom.toast.classList.remove("hidden");
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => dom.toast.classList.add("hidden"), 2400);
+  }
+
+  function setSaveStatus(status, detail = "") {
+    if (!dom.saveStatus) return;
+    const suffix = detail ? ` (${detail})` : "";
+    if (status === "saved") dom.saveStatus.textContent = `Save status: Saved${suffix}`;
+    else if (status === "saving") dom.saveStatus.textContent = `Save status: Saving...${suffix}`;
+    else if (status === "offline") dom.saveStatus.textContent = `Save status: Offline / pending${suffix}`;
+    else dom.saveStatus.textContent = `Save status: Save failed${suffix}`;
+  }
+
   function getDefaultState() {
     const now = Date.now();
     return {
+      schemaVersion: SCHEMA_VERSION,
       bankBalance: 500,
       bankLevel: 1,
       bankXP: 0,
@@ -144,6 +262,7 @@
       txLog: [],
 
       activeJobId: null,
+      activeJobMeta: null,
       jobAcceptedAt: null,
       jobFinishAt: null,
       jobCooldownUntil: null,
@@ -161,15 +280,15 @@
       activeOpportunity: null,
       nextOpportunityCheckAt: now + randInt(5 * 60 * 1000, 10 * 60 * 1000),
 
-      activeBoostId: null,
-      boostEndsAt: null,
+      inventory: {},
+      orders: {},
+      activeBoosts: {},
 
       skillPoints: 0,
       trainingsBought: 0,
       skills: { efficiency: 0, speed: 0, luck: 0, charisma: 0 },
 
       ownedBusinesses: {},
-
       casinoStats: { wins: 0, losses: 0 },
 
       lastDailyBonusAt: null,
@@ -180,107 +299,121 @@
     };
   }
 
-  function loadState() {
+  function deepMerge(defaultObj, loadedObj) {
+    if (Array.isArray(defaultObj)) return Array.isArray(loadedObj) ? loadedObj : defaultObj;
+    if (defaultObj && typeof defaultObj === "object") {
+      const out = { ...defaultObj };
+      if (loadedObj && typeof loadedObj === "object") {
+        for (const key of Object.keys(loadedObj)) {
+          out[key] = deepMerge(defaultObj[key], loadedObj[key]);
+        }
+      }
+      return out;
+    }
+    return loadedObj === undefined ? defaultObj : loadedObj;
+  }
+
+  function migrateState(raw) {
     const defaults = getDefaultState();
+    const merged = deepMerge(defaults, raw || {});
+    if (!merged.schemaVersion || merged.schemaVersion < SCHEMA_VERSION) {
+      merged.schemaVersion = SCHEMA_VERSION;
+    }
+    if (!merged.orders || typeof merged.orders !== "object") merged.orders = {};
+    if (!merged.inventory || typeof merged.inventory !== "object") merged.inventory = {};
+    if (!merged.activeBoosts || typeof merged.activeBoosts !== "object") merged.activeBoosts = {};
+    return merged;
+  }
+
+  function loadLocalState() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return defaults;
-      const parsed = JSON.parse(raw);
-      const merged = { ...defaults, ...parsed };
-      merged.skills = { ...defaults.skills, ...(parsed.skills || {}) };
-      merged.casinoStats = { ...defaults.casinoStats, ...(parsed.casinoStats || {}) };
-      merged.ownedBusinesses = parsed.ownedBusinesses || {};
-      return merged;
+      if (!raw) return getDefaultState();
+      return migrateState(JSON.parse(raw));
     } catch {
-      return defaults;
+      return getDefaultState();
     }
   }
 
-  function saveState() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    scheduleCloudSave();
-  }
-
   function replaceState(next) {
-    const fresh = { ...getDefaultState(), ...(next || {}) };
-    fresh.skills = { efficiency: 0, speed: 0, luck: 0, charisma: 0, ...(next?.skills || {}) };
-    fresh.casinoStats = { wins: 0, losses: 0, ...(next?.casinoStats || {}) };
-    fresh.ownedBusinesses = next?.ownedBusinesses || {};
+    const fresh = migrateState(next);
     Object.keys(state).forEach((k) => delete state[k]);
     Object.assign(state, fresh);
   }
 
-  async function loadCloudState(uid) {
+  function exportGameStateForSave() {
+    return JSON.parse(JSON.stringify(state));
+  }
+
+  function saveLocalState() {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  }
+
+  function saveState() {
+    saveLocalState();
+    scheduleAutosave();
+  }
+
+  async function loadUserGameState(uid) {
     if (!firebaseReady || !uid) return;
     const userRef = firebaseApi.doc(db, "users", uid);
     const snap = await firebaseApi.getDoc(userRef);
     if (!snap.exists()) {
-      await firebaseApi.setDoc(
-        userRef,
-        {
-          createdAt: firebaseApi.serverTimestamp(),
-          updatedAt: firebaseApi.serverTimestamp(),
-          gameState: state
-        },
-        { merge: true }
-      );
+      const initial = getDefaultState();
+      replaceState(initial);
+      await firebaseApi.setDoc(userRef, {
+        email: auth.currentUser?.email || "",
+        createdAt: firebaseApi.serverTimestamp(),
+        updatedAt: firebaseApi.serverTimestamp(),
+        gameState: initial
+      }, { merge: true });
+      setSaveStatus("saved");
       return;
     }
     const data = snap.data() || {};
-    if (data.gameState) {
-      replaceState(data.gameState);
-      balanceDisplay = state.bankBalance;
-    }
+    const loaded = migrateState(data.gameState || {});
+    replaceState(loaded);
+    saveLocalState();
+    setSaveStatus("saved");
+  }
+
+  async function saveUserGameState(uid, gameState) {
+    if (!firebaseReady || !uid) return;
+    const userRef = firebaseApi.doc(db, "users", uid);
+    await firebaseApi.setDoc(userRef, {
+      email: auth.currentUser?.email || "",
+      updatedAt: firebaseApi.serverTimestamp(),
+      gameState
+    }, { merge: true });
   }
 
   async function flushCloudSave() {
     if (!firebaseReady || !currentUid || !cloudDirty || saveInFlight) return;
     saveInFlight = true;
     cloudDirty = false;
+    setSaveStatus("saving");
     try {
-      const userRef = firebaseApi.doc(db, "users", currentUid);
-      await firebaseApi.setDoc(
-        userRef,
-        {
-          updatedAt: firebaseApi.serverTimestamp(),
-          gameState: state
-        },
-        { merge: true }
-      );
-    } catch {
+      await saveUserGameState(currentUid, exportGameStateForSave());
+      setSaveStatus("saved");
+    } catch (err) {
       cloudDirty = true;
+      setSaveStatus(navigator.onLine ? "error" : "offline", err?.code || "");
     } finally {
       saveInFlight = false;
-      if (cloudDirty) scheduleCloudSave();
+      if (cloudDirty) scheduleAutosave();
     }
   }
 
-  function scheduleCloudSave() {
-    if (!firebaseReady || !currentUid) return;
+  function scheduleAutosave() {
+    if (!firebaseReady || !currentUid) {
+      if (localAuthMode) setSaveStatus("saved", "local");
+      return;
+    }
     cloudDirty = true;
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(flushCloudSave, 150);
-    if (!queuedImmediateFlush) {
-      queuedImmediateFlush = true;
-      queueMicrotask(async () => {
-        queuedImmediateFlush = false;
-        await flushCloudSave();
-      });
-    }
-  }
-
-  function fmtMoney(v) {
-    return `$${Math.max(0, Math.floor(v)).toLocaleString()}`;
-  }
-
-  function usernameToEmail(usernameRaw) {
-    const clean = String(usernameRaw || "").trim().toLowerCase();
-    const safe = clean.replace(/[^a-z0-9._-]/g, "");
-    return safe ? `${safe}@player.fakebank.local` : "";
-  }
-
-  function setAuthError(message) {
-    dom.authError.textContent = message || "";
+    saveTimer = setTimeout(() => {
+      flushCloudSave();
+    }, 500);
   }
 
   function showAuthScreen() {
@@ -291,6 +424,16 @@
   function showGameScreen() {
     dom.authScreen.classList.add("hidden");
     dom.gameScreen.classList.remove("hidden");
+  }
+
+  function usernameToEmail(usernameRaw) {
+    const clean = String(usernameRaw || "").trim().toLowerCase();
+    const safe = clean.replace(/[^a-z0-9._-]/g, "");
+    return safe ? `${safe}@player.fakebank.local` : "";
+  }
+
+  function setAuthError(msg) {
+    dom.authError.textContent = msg || "";
   }
 
   function formatAuthError(err) {
@@ -306,14 +449,20 @@
 
   function bindAuthEvents() {
     dom.loginBtn.onclick = async () => {
-      if (!firebaseReady) return;
       setAuthError("");
-      const email = usernameToEmail(dom.usernameInput.value);
+      const username = String(dom.usernameInput.value || "").trim();
+      const email = usernameToEmail(username);
       const password = dom.passwordInput.value;
-      if (!email || !password) {
+      if (!username || !password) {
         setAuthError("Enter username and password.");
         return;
       }
+
+      if (!firebaseReady) {
+        setAuthError("Cloud login is unavailable on this page. Open your deployed site URL to sync across devices.");
+        return;
+      }
+
       try {
         await firebaseApi.signInWithEmailAndPassword(auth, email, password);
       } catch (err) {
@@ -322,14 +471,20 @@
     };
 
     dom.signupBtn.onclick = async () => {
-      if (!firebaseReady) return;
       setAuthError("");
-      const email = usernameToEmail(dom.usernameInput.value);
+      const username = String(dom.usernameInput.value || "").trim();
+      const email = usernameToEmail(username);
       const password = dom.passwordInput.value;
-      if (!email || !password) {
+      if (!username || !password) {
         setAuthError("Enter username and password.");
         return;
       }
+
+      if (!firebaseReady) {
+        setAuthError("Cloud sign up is unavailable on this page. Open your deployed site URL to sync across devices.");
+        return;
+      }
+
       try {
         await firebaseApi.createUserWithEmailAndPassword(auth, email, password);
       } catch (err) {
@@ -337,7 +492,20 @@
       }
     };
 
+    dom.guestBtn.onclick = async () => {
+      localStorage.setItem(LOCAL_USER_KEY, "guest");
+      localAuthMode = true;
+      await handleAuthState({ uid: "local_guest", email: "guest@local.test" });
+    };
+
     dom.logoutBtn.onclick = async () => {
+      if (localAuthMode) {
+        localStorage.removeItem(LOCAL_USER_KEY);
+        currentUid = null;
+        showAuthScreen();
+        dom.whoami.textContent = "";
+        return;
+      }
       if (!firebaseReady) return;
       await firebaseApi.signOut(auth);
     };
@@ -348,6 +516,12 @@
   }
 
   async function initFirebaseServices() {
+    if (location.protocol === "file:") {
+      localAuthMode = false;
+      dom.setupMessage.textContent = "Cloud login is disabled on file://. Use your deployed URL for cross-device saves, or Play As Guest for local test mode.";
+      return;
+    }
+
     const hasRequired = (cfg) => Boolean(cfg) && REQUIRED_FIREBASE_KEYS.every((k) => Boolean(cfg[k]));
 
     if (!hasRequired(window.FIREBASE_CONFIG)) {
@@ -364,7 +538,16 @@
           }
         }
       } catch {
-        // no-op
+        // ignored
+      }
+    }
+
+    if (typeof window.FIREBASE_CONFIG === "string") {
+      try {
+        window.FIREBASE_CONFIG = JSON.parse(window.FIREBASE_CONFIG);
+      } catch (err) {
+        dom.setupMessage.textContent = err.message;
+        return;
       }
     }
 
@@ -409,10 +592,13 @@
     }
     currentUid = user.uid;
     try {
-      await loadCloudState(user.uid);
+      if (!localAuthMode) await loadUserGameState(user.uid);
+      else replaceState(loadLocalState());
+      balanceDisplay = state.bankBalance;
     } catch {
-      // keep local state if cloud load fails
+      // keep local state
     }
+
     const uname = user.email ? user.email.split("@")[0] : "Player";
     dom.whoami.textContent = `Signed in as ${uname}`;
     showGameScreen();
@@ -420,50 +606,84 @@
     else render();
   }
 
-  function fmtDur(ms) {
-    if (ms <= 0) return "00:00";
-    const s = Math.floor(ms / 1000);
-    const m = Math.floor(s / 60);
-    const sec = s % 60;
-    return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+  function addTx(type, amount, meta = {}) {
+    state.txLog.unshift({ ts: Date.now(), type, amount, meta });
+    state.txLog = state.txLog.slice(0, 25);
   }
 
-  function fmtTs(ts) {
-    return ts ? new Date(ts).toLocaleTimeString() : "--";
+  function gainXP(amount) {
+    state.bankXP += amount;
+    let threshold = state.bankLevel * XP_PER_LEVEL_BASE;
+    while (state.bankXP >= threshold) {
+      state.bankXP -= threshold;
+      state.bankLevel += 1;
+      threshold = state.bankLevel * XP_PER_LEVEL_BASE;
+    }
   }
 
-  function randInt(min, max) {
-    return Math.floor(Math.random() * (max - min + 1)) + min;
+  function removeExpiredBoosts(now = Date.now()) {
+    for (const [boostId, boost] of Object.entries(state.activeBoosts)) {
+      const doneByTime = boost.endsAt && now >= boost.endsAt;
+      const doneByUses = boost.type === "payoutBonusNextN" && (boost.remainingUses || 0) <= 0;
+      if (doneByTime || doneByUses) {
+        delete state.activeBoosts[boostId];
+      }
+    }
   }
 
-  function streakBonusPct() {
-    const s = state.mainStreak;
-    if (s >= 10) return 0.15;
-    if (s >= 5) return 0.08;
-    if (s >= 2) return 0.03;
-    return 0;
+  function collectBoostEffects(now = Date.now()) {
+    removeExpiredBoosts(now);
+
+    let moneyMult = 0;
+    let payoutBonusNextN = 0;
+    let cooldownReduction = 0;
+    let luckBonus = 0;
+
+    for (const boost of Object.values(state.activeBoosts)) {
+      if (boost.endsAt && now >= boost.endsAt) continue;
+      if (boost.type === "moneyMultiplier") moneyMult += boost.value;
+      if (boost.type === "payoutBonusNextN" && (boost.remainingUses || 0) > 0) payoutBonusNextN += boost.value;
+      if (boost.type === "cooldownReduction") cooldownReduction += boost.value;
+      if (boost.type === "luckBonus") luckBonus += boost.value;
+    }
+
+    return {
+      moneyMult,
+      payoutBonusNextN,
+      cooldownReduction,
+      luckBonus
+    };
   }
 
-  function getModifiers() {
-    const efficiency = Math.min(state.skills.efficiency, 10);
-    const speed = Math.min(state.skills.speed, 10);
-    const luck = Math.min(state.skills.luck, 10);
-    const charisma = Math.max(0, state.skills.charisma || 0);
+  function consumePayoutBonusUses() {
+    for (const [boostId, boost] of Object.entries(state.activeBoosts)) {
+      if (boost.type !== "payoutBonusNextN") continue;
+      if ((boost.remainingUses || 0) <= 0) continue;
+      boost.remainingUses -= 1;
+      if (boost.remainingUses <= 0) delete state.activeBoosts[boostId];
+    }
+  }
 
-    let payoutMult = 1 + efficiency * 0.02;
+  function getModifiers(now = Date.now()) {
+    const skills = state.skills || {};
+    const efficiency = Math.min(skills.efficiency || 0, 10);
+    const speed = Math.min(skills.speed || 0, 10);
+    const luck = Math.min(skills.luck || 0, 10);
+    const charisma = Math.max(0, skills.charisma || 0);
+
+    const boosts = collectBoostEffects(now);
+
+    let payoutMult = 1 + efficiency * 0.02 + boosts.moneyMult;
     let durationMult = 1 - speed * 0.02;
     let xpMult = 1;
     let interestMult = 1;
-    let riskyLuckBonus = Math.min(0.15, luck * 0.015);
+    let riskyLuckBonus = Math.min(0.15, luck * 0.015) + boosts.luckBonus;
 
-    if (state.activeBoostId && state.boostEndsAt && Date.now() < state.boostEndsAt) {
-      if (state.activeBoostId === "focus") payoutMult *= 1.15;
-      if (state.activeBoostId === "drink") durationMult *= 0.85;
-      if (state.activeBoostId === "charm") riskyLuckBonus += 0.10;
-    }
+    durationMult *= Math.max(0.2, 1 - boosts.cooldownReduction * 0.65);
 
-    payoutMult = Math.min(payoutMult, 2.5);
-    durationMult = Math.max(durationMult, 0.60);
+    payoutMult = Math.min(2.5, payoutMult);
+    durationMult = Math.max(0.60, durationMult);
+    riskyLuckBonus = Math.min(0.35, riskyLuckBonus);
 
     return {
       payoutMult,
@@ -471,8 +691,18 @@
       xpMult,
       interestMult,
       riskyLuckBonus,
-      repGainBonus: Math.floor(charisma / 3)
+      repGainBonus: Math.floor(charisma / 3),
+      payoutBonusNextN: boosts.payoutBonusNextN,
+      cooldownReduction: Math.min(0.40, boosts.cooldownReduction)
     };
+  }
+
+  function streakBonusPct() {
+    const s = state.mainStreak || 0;
+    if (s >= 10) return 0.15;
+    if (s >= 5) return 0.08;
+    if (s >= 2) return 0.03;
+    return 0;
   }
 
   function calcMainBaseReward(job) {
@@ -511,28 +741,13 @@
     return { reward: baseReward, repDelta: 1 };
   }
 
-  function addTx(type, amount, meta = {}) {
-    state.txLog.unshift({ ts: Date.now(), type, amount, meta });
-    state.txLog = state.txLog.slice(0, 25);
-  }
-
-  function gainXP(amount) {
-    state.bankXP += amount;
-    let threshold = state.bankLevel * XP_PER_LEVEL_BASE;
-    while (state.bankXP >= threshold) {
-      state.bankXP -= threshold;
-      state.bankLevel += 1;
-      threshold = state.bankLevel * XP_PER_LEVEL_BASE;
-    }
-  }
-
   function canTakeMainJob(now = Date.now()) {
     if (state.activeJobId) return { ok: false, reason: "You already have an active main job." };
     if (state.jobCooldownUntil && now < state.jobCooldownUntil) return { ok: false, reason: "Main job cooldown active." };
     return { ok: true, reason: "" };
   }
 
-  function acceptMainJob(jobId) {
+  function acceptMainJob(jobId, asOpportunity = false) {
     const now = Date.now();
     const job = MAIN_JOBS.find((j) => j.id === jobId);
     if (!job) return;
@@ -544,12 +759,22 @@
     if (state.streakWindowUntil && now <= state.streakWindowUntil) state.mainStreak += 1;
     else state.mainStreak = 0;
 
-    const mods = getModifiers();
+    const mods = getModifiers(now);
     const effectiveDurationMs = Math.max(30 * 1000, Math.round(job.durationMin * 60 * 1000 * mods.durationMult));
 
     state.activeJobId = job.id;
+    state.activeJobMeta = {
+      id: job.id,
+      name: asOpportunity ? "Flash Contract" : job.name,
+      durationMin: job.durationMin,
+      basePay: asOpportunity ? Math.round(job.basePay * 2) : job.basePay,
+      riskType: job.riskType || null,
+      category: job.category || "general"
+    };
     state.jobAcceptedAt = now;
     state.jobFinishAt = now + effectiveDurationMs;
+
+    if (asOpportunity) state.activeOpportunity = null;
 
     saveState();
     render();
@@ -557,36 +782,42 @@
 
   function claimMainJob() {
     const now = Date.now();
-    if (!state.activeJobId || !state.jobFinishAt || now < state.jobFinishAt) return;
+    if (!state.activeJobId || !state.jobFinishAt || now < state.jobFinishAt || !state.activeJobMeta) return;
 
-    const job = MAIN_JOBS.find((j) => j.id === state.activeJobId);
-    if (!job) return;
+    const job = { ...state.activeJobMeta };
 
     state.activeJobId = null;
+    state.activeJobMeta = null;
     state.jobAcceptedAt = null;
     state.jobFinishAt = null;
     saveState();
 
-    const mods = getModifiers();
+    const mods = getModifiers(now);
     let reward = Math.round(calcMainBaseReward(job) * mods.payoutMult);
     const risky = rollRiskyReward(job, reward, mods.riskyLuckBonus);
     reward = Math.round(risky.reward);
 
     const tax = Math.floor(reward * 0.10);
-    let finalPayout = reward - tax;
-    finalPayout = Math.round(finalPayout * (1 + streakBonusPct()));
+    let payout = reward - tax;
 
-    state.bankBalance += finalPayout;
+    payout = Math.round(payout * (1 + streakBonusPct()));
+    if (mods.payoutBonusNextN > 0) {
+      payout = Math.round(payout * (1 + mods.payoutBonusNextN));
+      consumePayoutBonusUses();
+    }
+
+    state.bankBalance += payout;
     const xpBase = Math.ceil(job.durationMin / 2);
     gainXP(Math.ceil(xpBase * mods.xpMult));
     state.reputation += risky.repDelta + mods.repGainBonus;
 
-    state.jobCooldownUntil = now + MAIN_COOLDOWN_MS;
+    const cooldownMs = Math.max(30 * 1000, Math.round(MAIN_COOLDOWN_MS * (1 - mods.cooldownReduction)));
+    state.jobCooldownUntil = now + cooldownMs;
     state.lastMainJobClaimAt = now;
     state.streakWindowUntil = now + STREAK_WINDOW_MS;
 
-    addTx("main_job", finalPayout, { job: job.name, gross: reward, tax, streakBonus: streakBonusPct() });
-    if (finalPayout > 5000) confettiBurst();
+    addTx("main_job", payout, { job: job.name, gross: reward, tax, streakBonus: streakBonusPct() });
+    if (payout > 5000) confettiBurst();
 
     saveState();
     render();
@@ -599,19 +830,20 @@
     }
   }
 
-  function acceptQuickTask(id) {
+  function acceptQuickTask(taskId) {
     const now = Date.now();
     resetQuickWindow(now);
     if (state.quickTaskActiveId) return;
     if (state.quickTasksUsedInWindow >= QUICK_MAX_IN_WINDOW) return;
 
-    const task = QUICK_TASKS.find((q) => q.id === id);
+    const task = QUICK_TASKS.find((q) => q.id === taskId);
     if (!task) return;
 
     state.quickTaskActiveId = task.id;
     state.quickTaskAcceptedAt = now;
     state.quickTaskFinishAt = now + task.durationSec * 1000;
     state.quickTasksUsedInWindow += 1;
+
     saveState();
     render();
   }
@@ -619,6 +851,7 @@
   function claimQuickTask() {
     const now = Date.now();
     if (!state.quickTaskActiveId || !state.quickTaskFinishAt || now < state.quickTaskFinishAt) return;
+
     const task = QUICK_TASKS.find((q) => q.id === state.quickTaskActiveId);
     if (!task) return;
 
@@ -629,10 +862,16 @@
 
     const scaled = Math.round(task.basePay * (1 + (state.bankLevel - 1) * 0.03));
     const tax = Math.floor(scaled * 0.10);
-    const payout = scaled - tax;
+    let payout = scaled - tax;
+
+    const mods = getModifiers(now);
+    if (mods.payoutBonusNextN > 0) {
+      payout = Math.round(payout * (1 + mods.payoutBonusNextN));
+      consumePayoutBonusUses();
+    }
 
     state.bankBalance += payout;
-    gainXP(Math.max(1, Math.ceil(task.durationSec / 30)));
+    gainXP(Math.max(1, Math.ceil(task.durationSec / 35)));
     addTx("quick_task", payout, { task: task.name, gross: scaled, tax });
 
     saveState();
@@ -654,7 +893,7 @@
       state.nextOpportunityCheckAt = now + randInt(5 * 60 * 1000, 10 * 60 * 1000);
       if (Math.random() < 0.20) {
         state.activeOpportunity = {
-          id: `opp_${now}`,
+          id: uniqueId("opp"),
           title: "Flash Contract",
           durationMin: 2,
           basePay: 80,
@@ -675,56 +914,53 @@
       return;
     }
 
-    const check = canTakeMainJob(now);
-    if (!check.ok) return;
-
-    if (state.streakWindowUntil && now <= state.streakWindowUntil) state.mainStreak += 1;
-    else state.mainStreak = 0;
-
-    const mods = getModifiers();
-    const durationMs = Math.max(30 * 1000, Math.round(opp.durationMin * 60 * 1000 * mods.durationMult));
-
-    state.activeJobId = opp.id;
-    state.jobAcceptedAt = now;
-    state.jobFinishAt = now + durationMs;
-
-    MAIN_JOBS.push({
+    const tempJob = {
       id: opp.id,
       name: opp.title,
       durationMin: opp.durationMin,
       basePay: opp.basePay,
       unlockLevel: 1,
-      category: "general",
-      temporary: true
-    });
+      category: "general"
+    };
 
-    state.activeOpportunity = null;
-    saveState();
-    render();
+    MAIN_JOBS.push(tempJob);
+    acceptMainJob(tempJob.id, true);
+    MAIN_JOBS.pop();
   }
 
   function boostCost(boost) {
     return Math.round(boost.baseCost * (1 + (state.bankLevel - 1) * 0.08));
   }
 
-  function buyBoost(id) {
+  function buyBoost(boostId) {
     const now = Date.now();
-    if (state.activeBoostId && state.boostEndsAt && now < state.boostEndsAt) return;
-    const boost = BOOSTS.find((b) => b.id === id);
+    const boost = BOOST_SHOP.find((b) => b.id === boostId);
     if (!boost) return;
+
     const cost = boostCost(boost);
-    if (state.bankBalance < cost) return;
+    if (state.bankBalance < cost) {
+      toast("Not enough money for boost.");
+      return;
+    }
 
     state.bankBalance -= cost;
-    state.activeBoostId = boost.id;
-    state.boostEndsAt = now + boost.durationMs;
+    const entryId = uniqueId(`boost_${boost.id}`);
+    state.activeBoosts[entryId] = {
+      itemId: boost.id,
+      type: boost.type,
+      value: boost.value,
+      startedAt: now,
+      endsAt: now + boost.durationMs
+    };
+
     addTx("boost_purchase", -cost, { boost: boost.name });
     saveState();
     render();
+    toast(`${boost.name} activated.`);
   }
 
   function getTrainingCost() {
-    return Math.round(25000 * Math.pow(1.25, state.trainingsBought));
+    return Math.round(25000 * Math.pow(1.25, state.trainingsBought || 0));
   }
 
   function buyTrainingPoint() {
@@ -741,7 +977,7 @@
   function spendSkillPoint(skill) {
     if (!state.skillPoints) return;
     if (!Object.prototype.hasOwnProperty.call(state.skills, skill)) return;
-    const cap = SKILL_CAPS[skill] ?? 10;
+    const cap = SKILL_CAPS[skill] || 10;
     if (state.skills[skill] >= cap) return;
 
     state.skills[skill] += 1;
@@ -762,14 +998,17 @@
   function buyOrUpgradeBusiness(id) {
     const biz = BUSINESSES.find((b) => b.id === id);
     if (!biz) return;
+
     const ent = businessEntry(id);
     if (ent.level >= 5) return;
+
     const cost = businessUpgradeCost(biz, ent.level);
     if (state.bankBalance < cost) return;
 
     state.bankBalance -= cost;
     ent.level += 1;
     if (!ent.lastPaidAt) ent.lastPaidAt = Date.now();
+
     addTx("business_upgrade", -cost, { business: biz.name, level: ent.level });
     saveState();
     render();
@@ -782,7 +1021,7 @@
 
   function processPassiveIncome() {
     const now = Date.now();
-    const mods = getModifiers();
+    const mods = getModifiers(now);
 
     if (!state.passiveCapWindowStart || now - state.passiveCapWindowStart >= 60 * 60 * 1000) {
       state.passiveCapWindowStart = now;
@@ -803,12 +1042,19 @@
 
       let payoutEach = 0;
       if (biz.id === "firm") {
-        payoutEach = Math.min(Math.floor(state.bankBalance * 0.01 * (1 + 0.25 * (ent.level - 1))), Math.round(10000 * (1 + 0.2 * (ent.level - 1))));
+        payoutEach = Math.min(
+          Math.floor(state.bankBalance * 0.01 * (1 + 0.25 * (ent.level - 1))),
+          Math.round(10000 * (1 + 0.2 * (ent.level - 1)))
+        );
       } else {
         payoutEach = Math.floor(biz.basePayout * (1 + 0.35 * (ent.level - 1)) * mods.payoutMult);
       }
 
       let total = payoutEach * intervals;
+      if (mods.payoutBonusNextN > 0) {
+        total = Math.round(total * (1 + mods.payoutBonusNextN));
+        consumePayoutBonusUses();
+      }
       if (total > capLeft) total = capLeft;
       if (total <= 0) {
         ent.lastPaidAt = now;
@@ -839,13 +1085,16 @@
   function applyInterest() {
     const now = Date.now();
     if (state.lastInterestAt && now - state.lastInterestAt < 60 * 60 * 1000) return;
-    const mods = getModifiers();
+
+    const mods = getModifiers(now);
     let interest = Math.floor(state.bankBalance * 0.01 * mods.interestMult);
     interest = Math.min(interest, 5000);
     if (interest <= 0) return;
+
     state.bankBalance += interest;
     state.lastInterestAt = now;
     addTx("interest", interest);
+
     saveState();
     render();
   }
@@ -853,34 +1102,176 @@
   function coinFlip() {
     const bet = Math.floor(Number(dom.coinBetInput.value));
     if (!Number.isFinite(bet) || bet <= 0) return;
+
     const maxBet = Math.min(state.bankBalance, 5000 + state.bankLevel * 500);
     if (bet > maxBet) {
-      dom.coinFlipHint.textContent = `Max bet right now is ${fmtMoney(maxBet)}.`;
+      dom.coinFlipHint.textContent = `Max bet is ${fmtMoney(maxBet)}.`;
       return;
     }
+
     if (bet > state.bankBalance) return;
 
     state.bankBalance -= bet;
     const win = Math.random() < 0.5;
+
     if (win) {
       const payout = Math.floor(bet * 1.9);
       state.bankBalance += payout;
       state.casinoStats.wins += 1;
       addTx("coin_flip", payout - bet, { bet, outcome: "win" });
-      dom.coinFlipHint.textContent = `Win! Net +${fmtMoney(payout - bet)}.`;
+      dom.coinFlipHint.textContent = `Win. Net +${fmtMoney(payout - bet)}.`;
     } else {
       state.casinoStats.losses += 1;
       addTx("coin_flip", -bet, { bet, outcome: "loss" });
       dom.coinFlipHint.textContent = `Loss. -${fmtMoney(bet)}.`;
     }
+
     saveState();
     render();
   }
 
-  function resetSave() {
-    if (!confirm("Reset all progress?")) return;
-    localStorage.removeItem(STORAGE_KEY);
-    location.reload();
+  function itemById(itemId) {
+    return ITEM_CATALOG.find((i) => i.id === itemId);
+  }
+
+  function deriveOrderStatus(order, now = Date.now()) {
+    if (order.status === "cancelled") return "cancelled";
+    if (now < order.shippedAt) return "processing";
+    if (now < order.outForDeliveryAt) return "shipped";
+    if (now < order.deliveredAt) return "out_for_delivery";
+    return "delivered";
+  }
+
+  function statusBadge(status) {
+    if (status === "out_for_delivery") return "Out for Delivery";
+    return status.replace(/_/g, " ");
+  }
+
+  function updateOrderStatuses(now = Date.now()) {
+    for (const order of Object.values(state.orders)) {
+      const next = deriveOrderStatus(order, now);
+      if (order.status !== next) {
+        order.status = next;
+        order.lastStatusUpdateAt = now;
+      }
+    }
+  }
+
+  function placeSingleItemOrder(itemId) {
+    if (purchaseLock) return;
+    purchaseLock = true;
+    try {
+      const item = itemById(itemId);
+      if (!item) return;
+
+      const qty = 1;
+      const subtotal = item.price * qty;
+      const shippingFee = 15;
+      const total = subtotal + shippingFee;
+
+      if (state.bankBalance < total) {
+        toast("Not enough money for this order.");
+        return;
+      }
+
+      const now = Date.now();
+      const shippedAt = now + randInt(30 * 1000, 2 * 60 * 1000);
+      const outForDeliveryAt = shippedAt + randInt(60 * 1000, 5 * 60 * 1000);
+      const deliveredAt = outForDeliveryAt + randInt(60 * 1000, 5 * 60 * 1000);
+
+      const orderId = uniqueId("ord");
+      const carrier = CARRIERS[randInt(0, CARRIERS.length - 1)];
+
+      state.bankBalance -= total;
+      state.orders[orderId] = {
+        id: orderId,
+        createdAt: now,
+        status: "processing",
+        items: [{ itemId: item.id, name: item.name, qty, price: item.price }],
+        subtotal,
+        shippingFee,
+        total,
+        trackingNumber: trackingNumber(),
+        carrier,
+        estimatedDeliveryAt: deliveredAt,
+        shippedAt,
+        outForDeliveryAt,
+        deliveredAt,
+        lastStatusUpdateAt: now,
+        deliveredClaimedToInventory: false
+      };
+
+      addTx("store_purchase", -total, { orderId, item: item.name, qty, subtotal, shippingFee });
+      selectedTrackOrderId = orderId;
+
+      saveState();
+      render();
+      toast(`Order placed. Tracking: ${state.orders[orderId].trackingNumber}`);
+    } finally {
+      purchaseLock = false;
+    }
+  }
+
+  function claimOrderItems(orderId) {
+    if (orderClaimLocks.has(orderId)) return;
+
+    const order = state.orders[orderId];
+    if (!order) return;
+
+    const now = Date.now();
+    if (deriveOrderStatus(order, now) !== "delivered") {
+      toast("Package not delivered yet.");
+      return;
+    }
+    if (order.deliveredClaimedToInventory) {
+      toast("Items already claimed.");
+      return;
+    }
+
+    orderClaimLocks.add(orderId);
+    try {
+      for (const line of order.items) {
+        if (!state.inventory[line.itemId]) state.inventory[line.itemId] = { qty: 0 };
+        state.inventory[line.itemId].qty += line.qty;
+      }
+      order.deliveredClaimedToInventory = true;
+      order.status = "delivered";
+      order.lastStatusUpdateAt = now;
+
+      addTx("order_claim", 0, { orderId, items: order.items.map((i) => `${i.name}x${i.qty}`).join(", ") });
+      saveState();
+      render();
+      toast("Order claimed into inventory.");
+    } finally {
+      orderClaimLocks.delete(orderId);
+    }
+  }
+
+  function useInventoryItem(itemId) {
+    const item = itemById(itemId);
+    if (!item || !item.boost) return;
+
+    const slot = state.inventory[itemId];
+    if (!slot || slot.qty <= 0) return;
+
+    slot.qty -= 1;
+    if (slot.qty <= 0) delete state.inventory[itemId];
+
+    const now = Date.now();
+    const boostId = uniqueId(`inv_${itemId}`);
+    state.activeBoosts[boostId] = {
+      itemId: item.id,
+      type: item.boost.type,
+      value: item.boost.value,
+      startedAt: now,
+      endsAt: now + (item.boost.durationMs || 60 * 1000),
+      remainingUses: item.boost.remainingUses || undefined
+    };
+
+    addTx("item_used", 0, { item: item.name, boost: item.boost.type });
+    saveState();
+    render();
+    toast(`${item.name} used.`);
   }
 
   function animateBalance(target) {
@@ -913,8 +1304,8 @@
   }
 
   function renderMainJob(now) {
-    const active = state.activeJobId ? MAIN_JOBS.find((j) => j.id === state.activeJobId) : null;
-    if (!active) {
+    const active = state.activeJobMeta;
+    if (!active || !state.activeJobId) {
       dom.mainJobStatus.textContent = "No active main job";
       dom.mainJobTimer.textContent = "--:--";
       dom.mainFinishAt.textContent = "Finish: --";
@@ -935,21 +1326,18 @@
     if (state.streakWindowUntil && now < state.streakWindowUntil) {
       dom.streakWindowText.textContent = `Keep streak: start next job within ${fmtDur(state.streakWindowUntil - now)}`;
     } else {
-      if (state.streakWindowUntil && now >= state.streakWindowUntil) {
-        state.mainStreak = 0;
-        state.streakWindowUntil = null;
-      }
       dom.streakWindowText.textContent = "No active streak window";
     }
 
     dom.jobBoard.innerHTML = "";
-    const mods = getModifiers();
-    MAIN_JOBS.filter((j) => !j.temporary).forEach((job) => {
+    const mods = getModifiers(now);
+
+    MAIN_JOBS.forEach((job) => {
       const can = canTakeMainJob(now).ok && state.bankLevel >= job.unlockLevel;
       const row = document.createElement("div");
       row.className = "job-row";
       const base = Math.round(calcMainBaseReward(job) * mods.payoutMult);
-      const taxed = base - Math.floor(base * 0.1);
+      const taxed = base - Math.floor(base * 0.10);
       const low = Math.round(taxed * 0.85);
       const high = Math.round(taxed * 1.15);
       const effectiveDur = Math.round(job.durationMin * 60 * 1000 * mods.durationMult);
@@ -961,7 +1349,7 @@
       btn.className = "btn";
       btn.textContent = "Accept";
       btn.disabled = !can;
-      btn.onclick = () => acceptMainJob(job.id);
+      btn.onclick = () => acceptMainJob(job.id, false);
       row.appendChild(btn);
       dom.jobBoard.appendChild(row);
     });
@@ -989,12 +1377,12 @@
       const row = document.createElement("div");
       row.className = "item-row";
       const scaled = Math.round(task.basePay * (1 + (state.bankLevel - 1) * 0.03));
-      const taxed = scaled - Math.floor(scaled * 0.1);
+      const taxed = scaled - Math.floor(scaled * 0.10);
       row.innerHTML = `<div class="row-head"><strong>${task.name}</strong><span>${task.durationSec}s</span></div><div class="row-meta">Est ${fmtMoney(taxed)}</div>`;
       const btn = document.createElement("button");
       btn.className = "btn secondary";
       btn.textContent = "Start";
-      btn.disabled = !!state.quickTaskActiveId || left <= 0;
+      btn.disabled = Boolean(state.quickTaskActiveId) || left <= 0;
       btn.onclick = () => acceptQuickTask(task.id);
       row.appendChild(btn);
       dom.quickTaskBoard.appendChild(row);
@@ -1009,7 +1397,7 @@
       dom.acceptOpportunityBtn.disabled = true;
     } else {
       const remain = opp.offerExpiresAt - now;
-      dom.opportunityStatus.textContent = `${opp.title} available!`;
+      dom.opportunityStatus.textContent = `${opp.title} available`;
       dom.opportunityTimer.textContent = remain > 0 ? `Accept within ${fmtDur(remain)}` : "Expired";
       dom.acceptOpportunityBtn.disabled = remain <= 0;
     }
@@ -1018,30 +1406,23 @@
   }
 
   function renderSpend(now) {
-    if (state.activeBoostId && state.boostEndsAt && now >= state.boostEndsAt) {
-      state.activeBoostId = null;
-      state.boostEndsAt = null;
-    }
-
-    if (state.activeBoostId) {
-      const boost = BOOSTS.find((b) => b.id === state.activeBoostId);
-      dom.boostStatus.textContent = `Active boost: ${boost.name}`;
-      dom.boostTimer.textContent = fmtDur(state.boostEndsAt - now);
-    } else {
-      dom.boostStatus.textContent = "No active boost";
-      dom.boostTimer.textContent = "--:--";
-    }
+    removeExpiredBoosts(now);
+    const activeBoostCount = Object.keys(state.activeBoosts).length;
+    dom.boostStatus.textContent = activeBoostCount ? `Active boosts: ${activeBoostCount}` : "No active boosts.";
 
     dom.boostShop.innerHTML = "";
-    BOOSTS.forEach((boost) => {
+    BOOST_SHOP.forEach((boost) => {
       const cost = boostCost(boost);
       const row = document.createElement("div");
       row.className = "item-row";
-      row.innerHTML = `<div class="row-head"><strong>${boost.name}</strong><span>${fmtMoney(cost)}</span></div><div class="row-meta">${boost.desc} for 5m</div>`;
+      row.innerHTML = `
+        <div class="row-head"><strong>${boost.name}</strong><span>${fmtMoney(cost)}</span></div>
+        <div class="row-meta">${boost.type} for ${fmtDur(boost.durationMs)}</div>
+      `;
       const btn = document.createElement("button");
       btn.className = "btn";
-      btn.textContent = "Buy";
-      btn.disabled = !!state.activeBoostId || state.bankBalance < cost;
+      btn.textContent = "Buy & Use";
+      btn.disabled = state.bankBalance < cost;
       btn.onclick = () => buyBoost(boost.id);
       row.appendChild(btn);
       dom.boostShop.appendChild(row);
@@ -1094,6 +1475,167 @@
     dom.coinFlipStats.textContent = `Wins: ${state.casinoStats.wins} | Losses: ${state.casinoStats.losses}`;
   }
 
+  function renderStore() {
+    dom.storeList.innerHTML = "";
+    ITEM_CATALOG.forEach((item) => {
+      const row = document.createElement("div");
+      row.className = "item-row";
+      row.innerHTML = `
+        <div class="row-head"><strong>${item.icon} ${item.name}</strong><span>${fmtMoney(item.price)}</span></div>
+        <div class="row-meta">${item.description}</div>
+      `;
+      const btn = document.createElement("button");
+      btn.className = "btn";
+      btn.textContent = "Buy (Ships)";
+      btn.disabled = purchaseLock || state.bankBalance < (item.price + 15);
+      btn.onclick = () => placeSingleItemOrder(item.id);
+      row.appendChild(btn);
+      dom.storeList.appendChild(row);
+    });
+  }
+
+  function renderInventory(now) {
+    removeExpiredBoosts(now);
+
+    dom.inventoryList.innerHTML = "";
+    const inventoryEntries = Object.entries(state.inventory)
+      .filter(([, v]) => (v.qty || 0) > 0)
+      .sort((a, b) => a[0].localeCompare(b[0]));
+
+    if (!inventoryEntries.length) {
+      dom.inventoryList.innerHTML = "<p class='hint'>No items in inventory yet. Claim delivered orders first.</p>";
+    } else {
+      for (const [itemId, slot] of inventoryEntries) {
+        const item = itemById(itemId);
+        if (!item) continue;
+        const row = document.createElement("div");
+        row.className = "item-row";
+        row.innerHTML = `
+          <div class="row-head"><strong>${item.icon} ${item.name}</strong><span>Qty ${slot.qty}</span></div>
+          <div class="row-meta">${item.description}</div>
+        `;
+        const btn = document.createElement("button");
+        btn.className = "btn secondary";
+        btn.textContent = "Use";
+        btn.disabled = slot.qty <= 0;
+        btn.onclick = () => useInventoryItem(itemId);
+        row.appendChild(btn);
+        dom.inventoryList.appendChild(row);
+      }
+    }
+
+    dom.activeBoostList.innerHTML = "";
+    const boosts = Object.entries(state.activeBoosts);
+    if (!boosts.length) {
+      dom.activeBoostList.innerHTML = "<p class='hint'>No active boosts.</p>";
+    } else {
+      boosts.forEach(([boostId, boost]) => {
+        const row = document.createElement("div");
+        row.className = "item-row";
+        const remain = Math.max(0, (boost.endsAt || now) - now);
+        const uses = boost.remainingUses !== undefined ? ` | uses left ${boost.remainingUses}` : "";
+        row.innerHTML = `
+          <div class="row-head"><strong>${boost.itemId}</strong><span>${fmtDur(remain)}</span></div>
+          <div class="row-meta">${boost.type} +${Math.round(boost.value * 100)}%${uses}</div>
+        `;
+        dom.activeBoostList.appendChild(row);
+      });
+    }
+
+    const mods = getModifiers(now);
+    dom.effectiveModsText.textContent = `Effective: payout x${mods.payoutMult.toFixed(2)}, duration x${mods.durationMult.toFixed(2)}, luck +${Math.round(mods.riskyLuckBonus * 100)}%`;
+  }
+
+  function renderOrders(now) {
+    updateOrderStatuses(now);
+
+    const orders = Object.values(state.orders).sort((a, b) => b.createdAt - a.createdAt);
+    dom.ordersList.innerHTML = "";
+
+    if (!orders.length) {
+      dom.ordersList.innerHTML = "<p class='hint'>No orders yet. Buy items in Store.</p>";
+      dom.trackPanel.innerHTML = "<p class='hint'>Select an order to track.</p>";
+      return;
+    }
+
+    if (!selectedTrackOrderId) selectedTrackOrderId = orders[0].id;
+
+    orders.forEach((order) => {
+      const status = deriveOrderStatus(order, now);
+      const row = document.createElement("div");
+      row.className = "item-row";
+      const shortId = order.id.slice(-8).toUpperCase();
+      const itemsSummary = order.items.map((it) => `${it.name} x${it.qty}`).join(", ");
+
+      row.innerHTML = `
+        <div class="row-head">
+          <strong>Order #${shortId}</strong>
+          <span class="badge ${status}">${statusBadge(status)}</span>
+        </div>
+        <div class="row-meta">${order.carrier} • ${order.trackingNumber}</div>
+        <div class="row-meta">Created: ${fmtTs(order.createdAt)} | ETA: ${fmtTs(order.estimatedDeliveryAt)}</div>
+        <div class="row-meta">${itemsSummary}</div>
+      `;
+
+      const actions = document.createElement("div");
+      actions.className = "top-actions";
+
+      const trackBtn = document.createElement("button");
+      trackBtn.className = "btn secondary";
+      trackBtn.textContent = "Track";
+      trackBtn.onclick = () => {
+        selectedTrackOrderId = order.id;
+        render();
+      };
+      actions.appendChild(trackBtn);
+
+      const claimBtn = document.createElement("button");
+      claimBtn.className = "btn";
+      claimBtn.textContent = order.deliveredClaimedToInventory ? "Claimed" : "Claim Items";
+      claimBtn.disabled = status !== "delivered" || order.deliveredClaimedToInventory;
+      claimBtn.onclick = () => claimOrderItems(order.id);
+      actions.appendChild(claimBtn);
+
+      row.appendChild(actions);
+      dom.ordersList.appendChild(row);
+    });
+
+    const selected = state.orders[selectedTrackOrderId] || orders[0];
+    if (!selected) {
+      dom.trackPanel.innerHTML = "<p class='hint'>Select an order to track.</p>";
+      return;
+    }
+    selectedTrackOrderId = selected.id;
+
+    const status = deriveOrderStatus(selected, now);
+    const steps = ["Order Placed", "Shipped", "Out for Delivery", "Delivered"];
+    const stepIndex = status === "processing" ? 1 : status === "shipped" ? 2 : status === "out_for_delivery" ? 3 : 4;
+    const progress = Math.round((stepIndex / 4) * 100);
+    const countdown = status === "delivered" ? "Delivered" : fmtDur(selected.deliveredAt - now);
+
+    dom.trackPanel.innerHTML = `
+      <p><strong>${selected.carrier} ${selected.trackingNumber}</strong></p>
+      <p class="row-meta">Order total: ${fmtMoney(selected.total)} | Created: ${fmtTs(selected.createdAt)}</p>
+      <p class="row-meta">ETA: ${fmtTs(selected.estimatedDeliveryAt)}</p>
+      <div class="progress-wrap"><div class="progress-bar" style="width:${progress}%"></div></div>
+      <p class="row-meta">Status: ${statusBadge(status)} | Countdown: ${countdown}</p>
+      <ol class="timeline">
+        <li>Order placed: ${fmtTs(selected.createdAt)}</li>
+        <li>Shipped: ${fmtTs(selected.shippedAt)}</li>
+        <li>Out for delivery: ${fmtTs(selected.outForDeliveryAt)}</li>
+        <li>Delivered: ${fmtTs(selected.deliveredAt)}</li>
+      </ol>
+    `;
+
+    if (status === "delivered" && !selected.deliveredClaimedToInventory) {
+      const btn = document.createElement("button");
+      btn.className = "btn";
+      btn.textContent = "Claim Items";
+      btn.onclick = () => claimOrderItems(selected.id);
+      dom.trackPanel.appendChild(btn);
+    }
+  }
+
   function renderLog() {
     dom.txLog.innerHTML = "";
     state.txLog.slice(0, 10).forEach((tx) => {
@@ -1108,6 +1650,7 @@
     const now = Date.now();
 
     animateBalance(state.bankBalance);
+
     dom.levelText.textContent = `Lvl ${state.bankLevel}`;
     const threshold = state.bankLevel * XP_PER_LEVEL_BASE;
     dom.xpText.textContent = `XP ${state.bankXP} / ${threshold}`;
@@ -1126,6 +1669,9 @@
     renderQuick(now);
     renderOpportunity(now);
     renderSpend(now);
+    renderStore();
+    renderInventory(now);
+    renderOrders(now);
     renderLog();
   }
 
@@ -1134,6 +1680,7 @@
     if (state.streakWindowUntil && now > state.streakWindowUntil) {
       state.mainStreak = 0;
       state.streakWindowUntil = null;
+      saveState();
     }
     render();
   }
@@ -1141,25 +1688,38 @@
   function tick30s() {
     opportunityCheck();
     processPassiveIncome();
+    saveState();
     render();
   }
 
+  function setActiveTab(name) {
+    const tabs = {
+      bank: [dom.tabBankBtn, dom.bankTab],
+      spend: [dom.tabSpendBtn, dom.spendTab],
+      store: [dom.tabStoreBtn, dom.storeTab],
+      inventory: [dom.tabInventoryBtn, dom.inventoryTab],
+      orders: [dom.tabOrdersBtn, dom.ordersTab]
+    };
+
+    for (const [key, [btn, panel]] of Object.entries(tabs)) {
+      btn.classList.toggle("active", key === name);
+      panel.classList.toggle("hidden", key !== name);
+    }
+  }
+
+  function resetSave() {
+    if (!confirm("Reset all progress?")) return;
+    localStorage.removeItem(STORAGE_KEY);
+    if (localAuthMode) localStorage.removeItem(LOCAL_USER_KEY);
+    location.reload();
+  }
+
   function wire() {
-    dom.tabBankBtn.onclick = () => {
-      dom.tabBankBtn.classList.add("active");
-      dom.tabSpendBtn.classList.remove("active");
-      dom.bankTab.classList.remove("hidden");
-      dom.spendTab.classList.add("hidden");
-    };
-
-    dom.tabSpendBtn.onclick = () => {
-      dom.tabSpendBtn.classList.add("active");
-      dom.tabBankBtn.classList.remove("active");
-      dom.spendTab.classList.remove("hidden");
-      dom.bankTab.classList.add("hidden");
-    };
-
-    dom.resetSaveBtn.onclick = resetSave;
+    dom.tabBankBtn.onclick = () => setActiveTab("bank");
+    dom.tabSpendBtn.onclick = () => setActiveTab("spend");
+    dom.tabStoreBtn.onclick = () => setActiveTab("store");
+    dom.tabInventoryBtn.onclick = () => setActiveTab("inventory");
+    dom.tabOrdersBtn.onclick = () => setActiveTab("orders");
 
     dom.claimMainJobBtn.onclick = claimMainJob;
     dom.claimQuickTaskBtn.onclick = claimQuickTask;
@@ -1170,6 +1730,14 @@
 
     dom.buyTrainingBtn.onclick = buyTrainingPoint;
     dom.coinFlipBtn.onclick = coinFlip;
+
+    dom.saveNowBtn.onclick = () => {
+      saveState();
+      flushCloudSave();
+      toast("Save requested.");
+    };
+
+    dom.resetSaveBtn.onclick = resetSave;
   }
 
   function startGame() {
@@ -1182,6 +1750,7 @@
     processPassiveIncome();
 
     wire();
+    setActiveTab("bank");
     render();
 
     tick1sHandle = setInterval(tick1s, 1000);
@@ -1192,13 +1761,23 @@
   async function init() {
     showAuthScreen();
     bindAuthEvents();
+    setSaveStatus("saved", "local");
+
     await initFirebaseServices();
+
+    if (localAuthMode) {
+      const savedUser = localStorage.getItem(LOCAL_USER_KEY);
+      if (savedUser) {
+        await handleAuthState({ uid: `local_${savedUser}`, email: `${savedUser}@local.test` });
+      }
+      return;
+    }
+
     if (!firebaseReady) return;
+
     firebaseApi.onAuthStateChanged(auth, handleAuthState);
     window.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "hidden") {
-        flushCloudSave();
-      }
+      if (document.visibilityState === "hidden") flushCloudSave();
     });
     window.addEventListener("beforeunload", () => {
       flushCloudSave();
