@@ -15,14 +15,15 @@
       <h1>Sign In To Continue</h1>
       <p class="sub">Your progress is tied to your account.</p>
       <label for="usernameInput">Username</label>
-      <input id="usernameInput" type="text" placeholder="username" />
+      <input id="usernameInput" type="text" placeholder="username" autocomplete="username" />
       <label for="passwordInput">Password</label>
-      <input id="passwordInput" type="password" placeholder="password" />
+      <input id="passwordInput" type="password" placeholder="password" autocomplete="current-password" />
       <p id="setupMessage" class="hint"></p>
       <p id="authError" class="hint error"></p>
       <div class="top-actions">
         <button id="loginBtn" class="btn">Log In</button>
         <button id="signupBtn" class="btn secondary">Sign Up</button>
+        <button id="guestBtn" class="btn tertiary">Play As Guest</button>
       </div>
     </section>
 
@@ -32,10 +33,15 @@
           <h1>Fake Bank Account Simulator</h1>
           <p class="sub">Fast-paced but balanced economy</p>
           <p id="whoami" class="hint"></p>
+          <p id="saveStatus" class="hint">Save status: Idle</p>
         </div>
         <div class="top-actions">
           <button id="tabBankBtn" class="tab-btn active">Bank</button>
           <button id="tabSpendBtn" class="tab-btn">Spend</button>
+          <button id="tabStoreBtn" class="tab-btn">Store</button>
+          <button id="tabInventoryBtn" class="tab-btn">Inventory</button>
+          <button id="tabOrdersBtn" class="tab-btn">Orders</button>
+          <button id="saveNowBtn" class="btn secondary">Save Now</button>
           <button id="logoutBtn" class="btn secondary">Logout</button>
           <button id="resetSaveBtn" class="btn danger">Reset Save</button>
         </div>
@@ -107,9 +113,9 @@
       <section id="spendTab" class="tab-panel hidden">
         <div class="grid two">
           <article class="card">
-            <h2>Boosts</h2>
-            <p id="boostStatus">No active boost</p>
-            <p class="timer" id="boostTimer">--:--</p>
+            <h2>Boost Shop</h2>
+            <p class="hint">Temporary boosts. One click to buy and activate.</p>
+            <p id="boostStatus" class="hint">No active boosts.</p>
             <div id="boostShop" class="list"></div>
           </article>
 
@@ -125,7 +131,7 @@
         <div class="grid two">
           <article class="card">
             <h2>Businesses</h2>
-            <p class="hint">Passive income is capped to keep active play strongest.</p>
+            <p class="hint">Passive income is capped to keep active jobs strongest.</p>
             <div id="businessPanel" class="list"></div>
           </article>
 
@@ -140,6 +146,46 @@
         </div>
       </section>
 
+      <section id="storeTab" class="tab-panel hidden">
+        <article class="card">
+          <h2>Item Store</h2>
+          <p class="hint">Orders ship over time. Delivered orders must be claimed into inventory.</p>
+          <div id="storeList" class="list"></div>
+        </article>
+      </section>
+
+      <section id="inventoryTab" class="tab-panel hidden">
+        <div class="grid two">
+          <article class="card">
+            <h2>Inventory</h2>
+            <div id="inventoryList" class="list"></div>
+          </article>
+
+          <article class="card">
+            <h2>Active Boosts</h2>
+            <div id="activeBoostList" class="list"></div>
+            <p id="effectiveModsText" class="hint"></p>
+          </article>
+        </div>
+      </section>
+
+      <section id="ordersTab" class="tab-panel hidden">
+        <div class="grid two">
+          <article class="card">
+            <h2>Orders</h2>
+            <div id="ordersList" class="list"></div>
+          </article>
+
+          <article class="card">
+            <h2>Track Package</h2>
+            <div id="trackPanel" class="track-panel">
+              <p class="hint">Select an order to track.</p>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <div id="toast" class="toast hidden"></div>
       <div id="confettiLayer"></div>
     </section>
   </main>
