@@ -1,3 +1,13 @@
+window.FIREBASE_CONFIG = {
+  apiKey: "AIzaSyBercDyJeoz_LHthMI1020y1n_f8OY5ovs",
+  authDomain: "bank-sim-e1116.firebaseapp.com",
+  projectId: "bank-sim-e1116",
+  storageBucket: "bank-sim-e1116.firebasestorage.app",
+  messagingSenderId: "1007081823271",
+  appId: "1:1007081823271:web:901744d579f52204e2c202",
+  measurementId: "G-39DBJK8Q1G"
+};
+
 const STORAGE_KEY = "fakebank_state_v1";
 const USERS_KEY = "fakebank_users_v1";
 const SESSION_KEY = "fakebank_session_v1";
