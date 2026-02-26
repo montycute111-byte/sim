@@ -534,6 +534,7 @@ async function handleAuthState(user) {
 async function initFirebaseServices() {
   if (!window.FIREBASE_CONFIG) {
     dom.setupMessage.textContent =
+      window.FIREBASE_CONFIG_ERROR ||
       "Firebase is not configured. Add window.FIREBASE_CONFIG to enable cloud login.";
     return;
   }
