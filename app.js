@@ -768,7 +768,7 @@
   }
 
   function getMaxConcurrentJobs() {
-    return 1 + (state.parallelJobUpgradeLevel || 0);
+    return 3 + (state.parallelJobUpgradeLevel || 0);
   }
 
   function getParallelUpgradeCost() {
