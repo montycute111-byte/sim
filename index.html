@@ -69,9 +69,11 @@
           <article class="card">
             <h2>Main Job</h2>
             <p id="mainJobStatus">No active main job</p>
+            <p class="hint" id="mainSlotsText">Job slots: 1 / 1</p>
             <p class="timer" id="mainJobTimer">--:--</p>
             <p class="hint" id="mainFinishAt">Finish: --</p>
-            <button id="claimMainJobBtn" class="btn" disabled>Claim Main Job</button>
+            <button id="claimMainJobBtn" class="btn" disabled>Claim Ready Job</button>
+            <div id="activeJobsList" class="list"></div>
             <p class="hint" id="cooldownStatus"></p>
             <hr />
             <h3>Streak</h3>
@@ -125,6 +127,10 @@
             <p id="trainingCostText">Training Cost: $25,000</p>
             <button id="buyTrainingBtn" class="btn">Buy +1 Skill Point</button>
             <div class="skill-grid" id="skillsPanel"></div>
+            <hr />
+            <h3>Parallel Jobs Upgrade</h3>
+            <p id="parallelUpgradeText" class="hint">Level 0 | Max jobs 1</p>
+            <button id="buyParallelUpgradeBtn" class="btn secondary">Upgrade Job Slots</button>
           </article>
         </div>
 
