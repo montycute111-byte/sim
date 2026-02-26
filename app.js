@@ -124,9 +124,11 @@
     interestStatus: document.getElementById("interestStatus"),
 
     mainJobStatus: document.getElementById("mainJobStatus"),
+    mainSlotsText: document.getElementById("mainSlotsText"),
     mainJobTimer: document.getElementById("mainJobTimer"),
     mainFinishAt: document.getElementById("mainFinishAt"),
     claimMainJobBtn: document.getElementById("claimMainJobBtn"),
+    activeJobsList: document.getElementById("activeJobsList"),
     cooldownStatus: document.getElementById("cooldownStatus"),
     streakText: document.getElementById("streakText"),
     streakWindowText: document.getElementById("streakWindowText"),
@@ -150,6 +152,8 @@
     skillPointText: document.getElementById("skillPointText"),
     trainingCostText: document.getElementById("trainingCostText"),
     buyTrainingBtn: document.getElementById("buyTrainingBtn"),
+    parallelUpgradeText: document.getElementById("parallelUpgradeText"),
+    buyParallelUpgradeBtn: document.getElementById("buyParallelUpgradeBtn"),
     skillsPanel: document.getElementById("skillsPanel"),
     businessPanel: document.getElementById("businessPanel"),
 
@@ -261,11 +265,9 @@
       reputation: 0,
       txLog: [],
 
-      activeJobId: null,
-      activeJobMeta: null,
-      jobAcceptedAt: null,
-      jobFinishAt: null,
+      activeJobs: [],
       jobCooldownUntil: null,
+      parallelJobUpgradeLevel: 0,
 
       quickTaskActiveId: null,
       quickTaskAcceptedAt: null,
@@ -322,6 +324,25 @@
     if (!merged.orders || typeof merged.orders !== "object") merged.orders = {};
     if (!merged.inventory || typeof merged.inventory !== "object") merged.inventory = {};
     if (!merged.activeBoosts || typeof merged.activeBoosts !== "object") merged.activeBoosts = {};
+    if (!Array.isArray(merged.activeJobs)) {
+      merged.activeJobs = [];
+      if (merged.activeJobId && merged.jobFinishAt) {
+        merged.activeJobs.push({
+          runId: uniqueId("job"),
+          jobId: merged.activeJobId,
+          name: merged.activeJobMeta?.name || merged.activeJobId,
+          durationMin: merged.activeJobMeta?.durationMin || 1,
+          basePay: merged.activeJobMeta?.basePay || 1,
+          riskType: merged.activeJobMeta?.riskType || null,
+          category: merged.activeJobMeta?.category || "general",
+          acceptedAt: merged.jobAcceptedAt || Date.now(),
+          finishAt: merged.jobFinishAt
+        });
+      }
+    }
+    if (typeof merged.parallelJobUpgradeLevel !== "number" || merged.parallelJobUpgradeLevel < 0) {
+      merged.parallelJobUpgradeLevel = 0;
+    }
     return merged;
   }
 
@@ -742,9 +763,31 @@
   }
 
   function canTakeMainJob(now = Date.now()) {
-    if (state.activeJobId) return { ok: false, reason: "You already have an active main job." };
-    if (state.jobCooldownUntil && now < state.jobCooldownUntil) return { ok: false, reason: "Main job cooldown active." };
+    if (state.activeJobs.length >= getMaxConcurrentJobs()) return { ok: false, reason: "All job slots are full." };
     return { ok: true, reason: "" };
+  }
+
+  function getMaxConcurrentJobs() {
+    return 1 + (state.parallelJobUpgradeLevel || 0);
+  }
+
+  function getParallelUpgradeCost() {
+    return Math.round(5000 * Math.pow(1.9, state.parallelJobUpgradeLevel || 0));
+  }
+
+  function buyParallelUpgrade() {
+    const level = state.parallelJobUpgradeLevel || 0;
+    const cost = getParallelUpgradeCost();
+    if (state.bankBalance < cost) {
+      toast("Not enough money for upgrade.");
+      return;
+    }
+    state.bankBalance -= cost;
+    state.parallelJobUpgradeLevel = level + 1;
+    addTx("parallel_upgrade", -cost, { level: state.parallelJobUpgradeLevel, maxJobs: getMaxConcurrentJobs() });
+    saveState();
+    render();
+    toast(`Job slots upgraded. Max jobs: ${getMaxConcurrentJobs()}`);
   }
 
   function acceptMainJob(jobId, asOpportunity = false) {
@@ -762,17 +805,17 @@
     const mods = getModifiers(now);
     const effectiveDurationMs = Math.max(30 * 1000, Math.round(job.durationMin * 60 * 1000 * mods.durationMult));
 
-    state.activeJobId = job.id;
-    state.activeJobMeta = {
-      id: job.id,
+    state.activeJobs.push({
+      runId: uniqueId("job"),
+      jobId: job.id,
       name: asOpportunity ? "Flash Contract" : job.name,
       durationMin: job.durationMin,
       basePay: asOpportunity ? Math.round(job.basePay * 2) : job.basePay,
       riskType: job.riskType || null,
-      category: job.category || "general"
-    };
-    state.jobAcceptedAt = now;
-    state.jobFinishAt = now + effectiveDurationMs;
+      category: job.category || "general",
+      acceptedAt: now,
+      finishAt: now + effectiveDurationMs
+    });
 
     if (asOpportunity) state.activeOpportunity = null;
 
@@ -780,16 +823,17 @@
     render();
   }
 
-  function claimMainJob() {
+  function claimMainJob(runId = null) {
     const now = Date.now();
-    if (!state.activeJobId || !state.jobFinishAt || now < state.jobFinishAt || !state.activeJobMeta) return;
+    let idx = -1;
+    if (runId) idx = state.activeJobs.findIndex((j) => j.runId === runId);
+    if (idx < 0) idx = state.activeJobs.findIndex((j) => now >= j.finishAt);
+    if (idx < 0) return;
 
-    const job = { ...state.activeJobMeta };
+    const job = { ...state.activeJobs[idx] };
+    if (now < job.finishAt) return;
 
-    state.activeJobId = null;
-    state.activeJobMeta = null;
-    state.jobAcceptedAt = null;
-    state.jobFinishAt = null;
+    state.activeJobs.splice(idx, 1);
     saveState();
 
     const mods = getModifiers(now);
@@ -811,8 +855,6 @@
     gainXP(Math.ceil(xpBase * mods.xpMult));
     state.reputation += risky.repDelta + mods.repGainBonus;
 
-    const cooldownMs = Math.max(30 * 1000, Math.round(MAIN_COOLDOWN_MS * (1 - mods.cooldownReduction)));
-    state.jobCooldownUntil = now + cooldownMs;
     state.lastMainJobClaimAt = now;
     state.streakWindowUntil = now + STREAK_WINDOW_MS;
 
@@ -1304,22 +1346,42 @@
   }
 
   function renderMainJob(now) {
-    const active = state.activeJobMeta;
-    if (!active || !state.activeJobId) {
+    const activeJobs = [...state.activeJobs].sort((a, b) => a.finishAt - b.finishAt);
+    const maxJobs = getMaxConcurrentJobs();
+    dom.mainSlotsText.textContent = `Job slots: ${activeJobs.length} / ${maxJobs}`;
+
+    if (!activeJobs.length) {
       dom.mainJobStatus.textContent = "No active main job";
       dom.mainJobTimer.textContent = "--:--";
       dom.mainFinishAt.textContent = "Finish: --";
       dom.claimMainJobBtn.disabled = true;
     } else {
-      const remain = state.jobFinishAt - now;
-      dom.mainJobStatus.textContent = `Active: ${active.name}`;
+      const next = activeJobs[0];
+      const remain = next.finishAt - now;
+      dom.mainJobStatus.textContent = `Active jobs: ${activeJobs.length}`;
       dom.mainJobTimer.textContent = fmtDur(remain);
-      dom.mainFinishAt.textContent = `Finish: ${fmtTs(state.jobFinishAt)}`;
-      dom.claimMainJobBtn.disabled = remain > 0;
+      dom.mainFinishAt.textContent = `Next finish: ${fmtTs(next.finishAt)}`;
+      dom.claimMainJobBtn.disabled = !activeJobs.some((j) => now >= j.finishAt);
     }
 
-    const cooldownRemain = state.jobCooldownUntil && now < state.jobCooldownUntil ? state.jobCooldownUntil - now : 0;
-    dom.cooldownStatus.textContent = cooldownRemain > 0 ? `Cooldown: ${fmtDur(cooldownRemain)}` : "Cooldown ready";
+    dom.activeJobsList.innerHTML = "";
+    activeJobs.forEach((job) => {
+      const row = document.createElement("div");
+      row.className = "item-row";
+      row.innerHTML = `
+        <div class="row-head"><strong>${job.name}</strong><span>${fmtDur(job.finishAt - now)}</span></div>
+        <div class="row-meta">Finish: ${fmtTs(job.finishAt)}</div>
+      `;
+      const btn = document.createElement("button");
+      btn.className = "btn secondary";
+      btn.textContent = "Claim";
+      btn.disabled = now < job.finishAt;
+      btn.onclick = () => claimMainJob(job.runId);
+      row.appendChild(btn);
+      dom.activeJobsList.appendChild(row);
+    });
+
+    dom.cooldownStatus.textContent = "Cooldown removed";
 
     const streakBonus = Math.round(streakBonusPct() * 100);
     dom.streakText.textContent = `Streak: ${state.mainStreak} (+${streakBonus}%)`;
@@ -1431,6 +1493,8 @@
     dom.skillPointText.textContent = `Skill Points: ${state.skillPoints}`;
     dom.trainingCostText.textContent = `Training Cost: ${fmtMoney(getTrainingCost())}`;
     dom.buyTrainingBtn.disabled = state.bankBalance < getTrainingCost();
+    dom.parallelUpgradeText.textContent = `Level ${state.parallelJobUpgradeLevel} | Max jobs ${getMaxConcurrentJobs()} | Next ${fmtMoney(getParallelUpgradeCost())}`;
+    dom.buyParallelUpgradeBtn.disabled = state.bankBalance < getParallelUpgradeCost();
 
     const skillMeta = [
       ["efficiency", "Efficiency", "+2% payout / point"],
@@ -1729,6 +1793,7 @@
     dom.interestBtn.onclick = applyInterest;
 
     dom.buyTrainingBtn.onclick = buyTrainingPoint;
+    dom.buyParallelUpgradeBtn.onclick = buyParallelUpgrade;
     dom.coinFlipBtn.onclick = coinFlip;
 
     dom.saveNowBtn.onclick = () => {
