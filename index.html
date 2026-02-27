@@ -41,6 +41,9 @@
           <button id="tabStoreBtn" class="tab-btn">Store</button>
           <button id="tabInventoryBtn" class="tab-btn">Inventory</button>
           <button id="tabOrdersBtn" class="tab-btn">Orders</button>
+          <button id="tabFriendsBtn" class="tab-btn">Friends</button>
+          <button id="tabTradeBtn" class="tab-btn">Trade</button>
+          <button id="tabSendBtn" class="tab-btn">Send</button>
           <button id="saveNowBtn" class="btn secondary">Save Now</button>
           <button id="logoutBtn" class="btn secondary">Logout</button>
           <button id="resetSaveBtn" class="btn danger">Reset Save</button>
@@ -186,7 +189,7 @@
       <section id="storeTab" class="tab-panel hidden">
         <article class="card">
           <h2>Item Store</h2>
-          <p class="hint">Rotating rarity shop with timed slots.</p>
+          <p class="hint">Standard item store.</p>
           <p id="shopLastUpdated" class="hint">Last updated: --</p>
           <div id="storeList" class="list"></div>
         </article>
@@ -223,6 +226,92 @@
             <div id="trackPanel" class="track-panel">
               <p class="hint">Select an order to track.</p>
             </div>
+          </article>
+        </div>
+      </section>
+
+      <section id="friendsTab" class="tab-panel hidden">
+        <div class="grid two">
+          <article class="card">
+            <h2>Find Friends</h2>
+            <div class="top-actions">
+              <input id="friendSearchInput" type="text" placeholder="Search username or display name" />
+              <button id="friendSearchBtn" class="btn secondary">Search</button>
+            </div>
+            <div id="friendSearchResults" class="list"></div>
+          </article>
+
+          <article class="card">
+            <h2>Your Friends</h2>
+            <div id="friendsList" class="list"></div>
+          </article>
+        </div>
+
+        <div class="grid two">
+          <article class="card">
+            <h2>Incoming Requests</h2>
+            <div id="incomingRequestsList" class="list"></div>
+          </article>
+
+          <article class="card">
+            <h2>Outgoing Requests</h2>
+            <div id="outgoingRequestsList" class="list"></div>
+          </article>
+        </div>
+      </section>
+
+      <section id="tradeTab" class="tab-panel hidden">
+        <div class="grid two">
+          <article class="card">
+            <h2>Create Trade</h2>
+            <label for="tradeFriendSelect">Friend</label>
+            <select id="tradeFriendSelect"></select>
+            <label for="tradeOfferMoneyInput">Offer Money</label>
+            <input id="tradeOfferMoneyInput" type="number" min="0" step="1" value="0" />
+            <label for="tradeRequestMoneyInput">Request Money</label>
+            <input id="tradeRequestMoneyInput" type="number" min="0" step="1" value="0" />
+            <label for="tradeOfferItemsInput">Offer Items</label>
+            <input id="tradeOfferItemsInput" type="text" placeholder="itemId:qty, itemId:qty" />
+            <label for="tradeRequestItemsInput">Request Items</label>
+            <input id="tradeRequestItemsInput" type="text" placeholder="itemId:qty, itemId:qty" />
+            <button id="createTradeBtn" class="btn">Create Trade Offer</button>
+            <p class="hint">Only friends can trade. Use format like `energy_drink:2`.</p>
+          </article>
+
+          <article class="card">
+            <h2>Incoming Trades</h2>
+            <div id="incomingTradesList" class="list"></div>
+          </article>
+        </div>
+
+        <div class="grid two">
+          <article class="card">
+            <h2>Outgoing Trades</h2>
+            <div id="outgoingTradesList" class="list"></div>
+          </article>
+          <article class="card">
+            <h2>Trade History</h2>
+            <div id="tradeHistoryList" class="list"></div>
+          </article>
+        </div>
+      </section>
+
+      <section id="sendTab" class="tab-panel hidden">
+        <div class="grid two">
+          <article class="card">
+            <h2>Send Money</h2>
+            <label for="sendFriendSelect">Friend</label>
+            <select id="sendFriendSelect"></select>
+            <label for="sendAmountInput">Amount</label>
+            <input id="sendAmountInput" type="number" min="1" step="1" value="100" />
+            <label for="sendNoteInput">Note (optional)</label>
+            <input id="sendNoteInput" type="text" maxlength="120" placeholder="Thanks!" />
+            <button id="sendMoneyBtn" class="btn">Send</button>
+          </article>
+
+          <article class="card">
+            <h2>Recent Transfers</h2>
+            <div id="recentTransfersList" class="list"></div>
           </article>
         </div>
       </section>
