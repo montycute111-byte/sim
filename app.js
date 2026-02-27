@@ -1,6 +1,7 @@
 (() => {
   const STORAGE_KEY = "fakebank_state_v1";
   const LOCAL_USER_KEY = "fakebank_local_user";
+  const LOCAL_ACCOUNTS_KEY = "fakebank_local_accounts_v1";
   const REQUIRED_FIREBASE_KEYS = ["apiKey", "authDomain", "projectId", "appId"];
 
   const SCHEMA_VERSION = 2;
@@ -589,7 +590,7 @@
 
   function loadLocalState() {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
+      const raw = localStorage.getItem(getLocalStateStorageKey());
       if (!raw) return getDefaultState();
       return migrateState(JSON.parse(raw));
     } catch {
@@ -608,7 +609,58 @@
   }
 
   function saveLocalState() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    localStorage.setItem(getLocalStateStorageKey(), JSON.stringify(state));
+  }
+
+  function getLocalStateStorageKey() {
+    const localUser = localStorage.getItem(LOCAL_USER_KEY);
+    if (!localUser) return STORAGE_KEY;
+    return `${STORAGE_KEY}__${String(localUser).trim().toLowerCase()}`;
+  }
+
+  function loadLocalAccounts() {
+    try {
+      const raw = localStorage.getItem(LOCAL_ACCOUNTS_KEY);
+      const parsed = raw ? JSON.parse(raw) : {};
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function saveLocalAccounts(accounts) {
+    localStorage.setItem(LOCAL_ACCOUNTS_KEY, JSON.stringify(accounts));
+  }
+
+  async function loginLocalUser(username, password) {
+    const key = String(username || "").trim().toLowerCase();
+    const accounts = loadLocalAccounts();
+    const record = accounts[key];
+    if (!record || record.password !== password) {
+      throw new Error("Invalid username or password.");
+    }
+    clearServerSession();
+    localStorage.setItem(LOCAL_USER_KEY, key);
+    localAuthMode = true;
+    await handleAuthState({ uid: `local_${key}`, email: `${key}@local.test` });
+  }
+
+  async function signupLocalUser(username, password) {
+    const key = String(username || "").trim().toLowerCase();
+    const accounts = loadLocalAccounts();
+    if (accounts[key]) {
+      throw new Error("Username already exists on this device.");
+    }
+    accounts[key] = {
+      username: key,
+      password: String(password || ""),
+      createdAt: Date.now()
+    };
+    saveLocalAccounts(accounts);
+    clearServerSession();
+    localStorage.setItem(LOCAL_USER_KEY, key);
+    localAuthMode = true;
+    await handleAuthState({ uid: `local_${key}`, email: `${key}@local.test` });
   }
 
   function saveState() {
@@ -693,6 +745,11 @@
   }
 
   async function flushCloudSave() {
+    if (localAuthMode) {
+      saveLocalState();
+      setSaveStatus("saved", "local");
+      return;
+    }
     if (!firebaseReady || !currentUid || !cloudDirty || saveInFlight) return;
     saveInFlight = true;
     cloudDirty = false;
@@ -710,6 +767,11 @@
   }
 
   function scheduleAutosave() {
+    if (localAuthMode) {
+      saveLocalState();
+      setSaveStatus("saved", "local");
+      return;
+    }
     if (!firebaseReady || !currentUid) {
       if (localAuthMode) setSaveStatus("saved", "local");
       return;
@@ -786,7 +848,12 @@
       }
 
       if (!firebaseReady) {
-        setAuthError("Cloud login is unavailable on this page. Open your deployed site URL to sync across devices.");
+        try {
+          await loginLocalUser(username, password);
+          setAuthError("");
+        } catch (err) {
+          setAuthError(err?.message || "Local login failed.");
+        }
         return;
       }
 
@@ -809,7 +876,12 @@
       }
 
       if (!firebaseReady) {
-        setAuthError("Cloud sign up is unavailable on this page. Open your deployed site URL to sync across devices.");
+        try {
+          await signupLocalUser(username, password);
+          setAuthError("");
+        } catch (err) {
+          setAuthError(err?.message || "Local sign up failed.");
+        }
         return;
       }
 
@@ -852,7 +924,7 @@
   async function initFirebaseServices() {
     if (location.protocol === "file:") {
       localAuthMode = false;
-      dom.setupMessage.textContent = "Cloud login is disabled on file://. Use your deployed URL for cross-device saves, or Play As Guest for local test mode.";
+      dom.setupMessage.textContent = "Cloud login is disabled on file://. Local username/password login works for testing on this device, or use your deployed URL for cross-device saves.";
       return;
     }
 
@@ -3479,7 +3551,7 @@
 
     dom.saveNowBtn.onclick = () => {
       saveState();
-      flushCloudSave();
+      if (!localAuthMode) flushCloudSave();
       toast("Save requested.");
     };
 
@@ -3525,6 +3597,15 @@
     }
 
     await initFirebaseServices();
+
+    if (!firebaseReady) {
+      const savedUser = localStorage.getItem(LOCAL_USER_KEY);
+      if (savedUser) {
+        localAuthMode = true;
+        await handleAuthState({ uid: `local_${savedUser}`, email: `${savedUser}@local.test` });
+      }
+      return;
+    }
 
     if (localAuthMode) {
       const savedUser = localStorage.getItem(LOCAL_USER_KEY);
