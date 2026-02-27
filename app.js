@@ -77,9 +77,17 @@
   const CARRIERS = ["USPS", "UPS", "FedEx", "DHL", "MegaShip"];
 
   const BUSINESSES = [
-    { id: "lemonade", name: "Lemonade Stand", baseCost: 10000, intervalMs: 10 * 60 * 1000, basePayout: 50 },
-    { id: "shop", name: "Online Shop", baseCost: 100000, intervalMs: 10 * 60 * 1000, basePayout: 300 },
-    { id: "firm", name: "Investment Firm", baseCost: 1000000, intervalMs: 60 * 60 * 1000, basePayout: 0 }
+    { id: "lemonade", name: "Lemonade Stand", icon: "🍋", baseCost: 10000, intervalMs: 10 * 60 * 1000, basePayout: 50, unlockType: "totalEarned", unlockValue: 0 },
+    { id: "hotdog", name: "Hotdog Stand", icon: "🌭", baseCost: 25000, intervalMs: 10 * 60 * 1000, basePayout: 120, unlockType: "totalEarned", unlockValue: 500 },
+    { id: "pizza", name: "Pizza Delivery", icon: "🍕", baseCost: 75000, intervalMs: 10 * 60 * 1000, basePayout: 260, unlockType: "totalEarned", unlockValue: 2500 },
+    { id: "coffee_shop", name: "Coffee Shop", icon: "☕", baseCost: 150000, intervalMs: 10 * 60 * 1000, basePayout: 420, unlockType: "totalEarned", unlockValue: 8000 },
+    { id: "film_studio", name: "Film Studio", icon: "🎬", baseCost: 600000, intervalMs: 20 * 60 * 1000, basePayout: 1400, unlockType: "totalEarned", unlockValue: 25000 },
+    { id: "firm", name: "Investment Firm", icon: "🏦", baseCost: 1000000, intervalMs: 60 * 60 * 1000, basePayout: 0, unlockType: "totalEarned", unlockValue: 70000 }
+  ];
+
+  const BUSINESS_UPGRADES = [
+    { id: "profit_boost_1", name: "Profit Boost I", cost: 85000, desc: "x1.25 payout on all businesses." },
+    { id: "speed_boost_1", name: "Speed Boost I", cost: 90000, desc: "Cycle time -10% on all businesses." }
   ];
 
   const SKILL_CAPS = { efficiency: 10, speed: 10, luck: 10, charisma: 30 };
@@ -156,6 +164,18 @@
     buyParallelUpgradeBtn: document.getElementById("buyParallelUpgradeBtn"),
     skillsPanel: document.getElementById("skillsPanel"),
     businessPanel: document.getElementById("businessPanel"),
+    businessMoneyBar: document.getElementById("businessMoneyBar"),
+    bizTabBusinessesBtn: document.getElementById("bizTabBusinessesBtn"),
+    bizTabUpgradesBtn: document.getElementById("bizTabUpgradesBtn"),
+    bizTabManagersBtn: document.getElementById("bizTabManagersBtn"),
+    bizTabStatsBtn: document.getElementById("bizTabStatsBtn"),
+    bizPanelBusinesses: document.getElementById("bizPanelBusinesses"),
+    bizPanelUpgrades: document.getElementById("bizPanelUpgrades"),
+    bizPanelManagers: document.getElementById("bizPanelManagers"),
+    bizPanelStats: document.getElementById("bizPanelStats"),
+    businessUpgradesPanel: document.getElementById("businessUpgradesPanel"),
+    businessManagersPanel: document.getElementById("businessManagersPanel"),
+    businessStatsPanel: document.getElementById("businessStatsPanel"),
 
     coinBetInput: document.getElementById("coinBetInput"),
     coinFlipBtn: document.getElementById("coinFlipBtn"),
@@ -163,11 +183,14 @@
     coinFlipStats: document.getElementById("coinFlipStats"),
 
     storeList: document.getElementById("storeList"),
+    shopLastUpdated: document.getElementById("shopLastUpdated"),
     inventoryList: document.getElementById("inventoryList"),
     activeBoostList: document.getElementById("activeBoostList"),
     effectiveModsText: document.getElementById("effectiveModsText"),
     ordersList: document.getElementById("ordersList"),
     trackPanel: document.getElementById("trackPanel"),
+    trackingSearchInput: document.getElementById("trackingSearchInput"),
+    trackingSearchBtn: document.getElementById("trackingSearchBtn"),
 
     toast: document.getElementById("toast"),
     confettiLayer: document.getElementById("confettiLayer")
@@ -186,12 +209,19 @@
 
   let tick1sHandle = null;
   let tick30sHandle = null;
+  let tick12sHandle = null;
   let saveTimer = null;
   let saveInFlight = false;
   let cloudDirty = false;
 
   let purchaseLock = false;
-  const orderClaimLocks = new Set();
+  let serverSession = { username: "", password: "" };
+  let serverShopSlots = [];
+  let serverShopLastUpdatedAt = null;
+  let serverOrders = [];
+  let activeBusinessTab = "businesses";
+  let serverMirrorSaveTimer = null;
+  let serverReachable = false;
 
   let firebaseApi = {
     onAuthStateChanged: null,
@@ -255,6 +285,37 @@
     else dom.saveStatus.textContent = `Save status: Save failed${suffix}`;
   }
 
+  function hasServerSession() {
+    return Boolean(serverSession.username && serverSession.password);
+  }
+
+  function setServerSession(username, password) {
+    serverSession = { username: String(username || ""), password: String(password || "") };
+    if (serverSession.username) localStorage.setItem("server_shop_username", serverSession.username);
+    if (serverSession.password) sessionStorage.setItem("server_shop_password", serverSession.password);
+  }
+
+  function clearServerSession() {
+    serverSession = { username: "", password: "" };
+    localStorage.removeItem("server_shop_username");
+    sessionStorage.removeItem("server_shop_password");
+  }
+
+  async function postJson(url, payload) {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      const err = new Error(data?.error || `Request failed (${resp.status})`);
+      err.status = resp.status;
+      throw err;
+    }
+    return data;
+  }
+
   function getDefaultState() {
     const now = Date.now();
     return {
@@ -289,6 +350,8 @@
       skillPoints: 0,
       trainingsBought: 0,
       skills: { efficiency: 0, speed: 0, luck: 0, charisma: 0 },
+      totalEarned: 0,
+      upgrades: {},
 
       ownedBusinesses: {},
       casinoStats: { wins: 0, losses: 0 },
@@ -324,6 +387,18 @@
     if (!merged.orders || typeof merged.orders !== "object") merged.orders = {};
     if (!merged.inventory || typeof merged.inventory !== "object") merged.inventory = {};
     if (!merged.activeBoosts || typeof merged.activeBoosts !== "object") merged.activeBoosts = {};
+    if (!merged.upgrades || typeof merged.upgrades !== "object") merged.upgrades = {};
+    if (!Number.isFinite(merged.totalEarned)) merged.totalEarned = 0;
+    if (!merged.ownedBusinesses || typeof merged.ownedBusinesses !== "object") merged.ownedBusinesses = {};
+    for (const [bizId, val] of Object.entries(merged.ownedBusinesses)) {
+      if (!val || typeof val !== "object") {
+        merged.ownedBusinesses[bizId] = { level: 0, lastPaidAt: Date.now(), hasManager: false };
+        continue;
+      }
+      if (!Number.isFinite(val.level)) val.level = 0;
+      if (!Number.isFinite(val.lastPaidAt)) val.lastPaidAt = Date.now();
+      if (typeof val.hasManager !== "boolean") val.hasManager = false;
+    }
     if (!Array.isArray(merged.activeJobs)) {
       merged.activeJobs = [];
       if (merged.activeJobId && merged.jobFinishAt) {
@@ -373,6 +448,7 @@
   function saveState() {
     saveLocalState();
     scheduleAutosave();
+    scheduleServerMirrorSave();
   }
 
   async function loadUserGameState(uid) {
@@ -437,6 +513,28 @@
     }, 500);
   }
 
+  async function flushServerMirrorSave() {
+    if (!hasServerSession()) return;
+    try {
+      await postJson("/api/progress/save", {
+        username: serverSession.username,
+        password: serverSession.password,
+        progress: exportGameStateForSave()
+      });
+      serverReachable = true;
+    } catch {
+      serverReachable = false;
+    }
+  }
+
+  function scheduleServerMirrorSave() {
+    if (!hasServerSession()) return;
+    clearTimeout(serverMirrorSaveTimer);
+    serverMirrorSaveTimer = setTimeout(() => {
+      flushServerMirrorSave();
+    }, 700);
+  }
+
   function showAuthScreen() {
     dom.authScreen.classList.remove("hidden");
     dom.gameScreen.classList.add("hidden");
@@ -486,6 +584,7 @@
 
       try {
         await firebaseApi.signInWithEmailAndPassword(auth, email, password);
+        setServerSession(username, password);
       } catch (err) {
         setAuthError(formatAuthError(err));
       }
@@ -508,12 +607,14 @@
 
       try {
         await firebaseApi.createUserWithEmailAndPassword(auth, email, password);
+        setServerSession(username, password);
       } catch (err) {
         setAuthError(formatAuthError(err));
       }
     };
 
     dom.guestBtn.onclick = async () => {
+      clearServerSession();
       localStorage.setItem(LOCAL_USER_KEY, "guest");
       localAuthMode = true;
       await handleAuthState({ uid: "local_guest", email: "guest@local.test" });
@@ -522,6 +623,7 @@
     dom.logoutBtn.onclick = async () => {
       if (localAuthMode) {
         localStorage.removeItem(LOCAL_USER_KEY);
+        clearServerSession();
         currentUid = null;
         showAuthScreen();
         dom.whoami.textContent = "";
@@ -529,6 +631,7 @@
       }
       if (!firebaseReady) return;
       await firebaseApi.signOut(auth);
+      clearServerSession();
     };
 
     dom.passwordInput.addEventListener("keydown", (e) => {
@@ -622,12 +725,20 @@
 
     const uname = user.email ? user.email.split("@")[0] : "Player";
     dom.whoami.textContent = `Signed in as ${uname}`;
+    if (hasServerSession()) {
+      await flushServerMirrorSave();
+      await refreshRotatingShop(true);
+      await refreshServerOrders();
+    }
     showGameScreen();
     if (!gameStarted) startGame();
     else render();
   }
 
   function addTx(type, amount, meta = {}) {
+    if (Number(amount) > 0) {
+      state.totalEarned = Math.max(0, Number(state.totalEarned || 0) + Number(amount));
+    }
     state.txLog.unshift({ ts: Date.now(), type, amount, meta });
     state.txLog = state.txLog.slice(0, 25);
   }
@@ -1028,8 +1139,10 @@
     render();
   }
 
-  function businessEntry(id) {
-    if (!state.ownedBusinesses[id]) state.ownedBusinesses[id] = { level: 0, lastPaidAt: Date.now() };
+  function businessEntry(id, createIfMissing = true) {
+    if (!state.ownedBusinesses[id] && createIfMissing) {
+      state.ownedBusinesses[id] = { level: 0, lastPaidAt: Date.now(), hasManager: false };
+    }
     return state.ownedBusinesses[id];
   }
 
@@ -1037,9 +1150,63 @@
     return Math.round(biz.baseCost * Math.pow(1.8, Math.max(0, level)));
   }
 
+  function managerCostForBusiness(biz) {
+    return Math.round(biz.baseCost * 10);
+  }
+
+  function isBusinessUnlocked(biz) {
+    if (!biz) return false;
+    if (biz.unlockType === "prevLevel") {
+      const prev = BUSINESSES[BUSINESSES.findIndex((x) => x.id === biz.id) - 1];
+      if (!prev) return true;
+      const prevEnt = businessEntry(prev.id, false);
+      return Number(prevEnt?.level || 0) >= Number(biz.unlockValue || 1);
+    }
+    return Number(state.totalEarned || 0) >= Number(biz.unlockValue || 0);
+  }
+
+  function businessGlobalProfitMult() {
+    let mult = 1;
+    if (state.upgrades?.profit_boost_1) mult *= 1.25;
+    return mult;
+  }
+
+  function businessGlobalSpeedMult() {
+    let mult = 1;
+    if (state.upgrades?.speed_boost_1) mult *= 0.9;
+    return mult;
+  }
+
+  function businessIntervalMs(biz) {
+    return Math.max(30 * 1000, Math.round(biz.intervalMs * businessGlobalSpeedMult()));
+  }
+
+  function businessPayoutPerInterval(biz, ent, mods) {
+    if (!biz || !ent || ent.level <= 0) return 0;
+    if (biz.id === "firm") {
+      let payout = Math.min(
+        Math.floor(state.bankBalance * 0.01 * (1 + 0.25 * (ent.level - 1))),
+        Math.round(10000 * (1 + 0.2 * (ent.level - 1)))
+      );
+      payout = Math.floor(payout * businessGlobalProfitMult() * (ent.hasManager ? 1.05 : 1));
+      return payout;
+    }
+    return Math.floor(
+      biz.basePayout *
+      (1 + 0.35 * (ent.level - 1)) *
+      mods.payoutMult *
+      businessGlobalProfitMult() *
+      (ent.hasManager ? 1.05 : 1)
+    );
+  }
+
   function buyOrUpgradeBusiness(id) {
     const biz = BUSINESSES.find((b) => b.id === id);
     if (!biz) return;
+    if (!isBusinessUnlocked(biz)) {
+      toast("This business is locked.");
+      return;
+    }
 
     const ent = businessEntry(id);
     if (ent.level >= 5) return;
@@ -1052,6 +1219,38 @@
     if (!ent.lastPaidAt) ent.lastPaidAt = Date.now();
 
     addTx("business_upgrade", -cost, { business: biz.name, level: ent.level });
+    saveState();
+    render();
+  }
+
+  function buyBusinessUpgrade(upgradeId) {
+    const upgrade = BUSINESS_UPGRADES.find((u) => u.id === upgradeId);
+    if (!upgrade) return;
+    if (state.upgrades[upgradeId]) return;
+    if (state.bankBalance < upgrade.cost) {
+      toast("Not enough money for upgrade.");
+      return;
+    }
+    state.bankBalance -= upgrade.cost;
+    state.upgrades[upgradeId] = true;
+    addTx("business_global_upgrade", -upgrade.cost, { upgrade: upgrade.name });
+    saveState();
+    render();
+  }
+
+  function hireBusinessManager(id) {
+    const biz = BUSINESSES.find((b) => b.id === id);
+    if (!biz) return;
+    const ent = businessEntry(id, false);
+    if (!ent || ent.level <= 0 || ent.hasManager) return;
+    const cost = managerCostForBusiness(biz);
+    if (state.bankBalance < cost) {
+      toast("Not enough money to hire manager.");
+      return;
+    }
+    state.bankBalance -= cost;
+    ent.hasManager = true;
+    addTx("manager_hired", -cost, { business: biz.name });
     saveState();
     render();
   }
@@ -1078,19 +1277,12 @@
       if (!ent || ent.level <= 0) continue;
 
       const last = ent.lastPaidAt || now;
-      let intervals = Math.floor((now - last) / biz.intervalMs);
+      const intervalMs = businessIntervalMs(biz);
+      let intervals = Math.floor((now - last) / intervalMs);
       if (intervals <= 0) continue;
       intervals = Math.min(intervals, 6);
 
-      let payoutEach = 0;
-      if (biz.id === "firm") {
-        payoutEach = Math.min(
-          Math.floor(state.bankBalance * 0.01 * (1 + 0.25 * (ent.level - 1))),
-          Math.round(10000 * (1 + 0.2 * (ent.level - 1)))
-        );
-      } else {
-        payoutEach = Math.floor(biz.basePayout * (1 + 0.35 * (ent.level - 1)) * mods.payoutMult);
-      }
+      let payoutEach = businessPayoutPerInterval(biz, ent, mods);
 
       let total = payoutEach * intervals;
       if (mods.payoutBonusNextN > 0) {
@@ -1177,16 +1369,25 @@
   }
 
   function deriveOrderStatus(order, now = Date.now()) {
-    if (order.status === "cancelled") return "cancelled";
-    if (now < order.shippedAt) return "processing";
-    if (now < order.outForDeliveryAt) return "shipped";
-    if (now < order.deliveredAt) return "out_for_delivery";
-    return "delivered";
+    if (!order) return "Processing";
+    if (["Processing", "Shipped", "OutForDelivery", "Delivered", "Cancelled"].includes(order.status)) {
+      if (order.status === "Cancelled") return "Cancelled";
+      if (now >= Number(order.etaAt || 0)) return "Delivered";
+      if (now >= Number(order.outForDeliveryAt || 0)) return "OutForDelivery";
+      if (now >= Number(order.shippedAt || 0)) return "Shipped";
+      return "Processing";
+    }
+    if (order.status === "cancelled") return "Cancelled";
+    if (now < order.shippedAt) return "Processing";
+    if (now < order.outForDeliveryAt) return "Shipped";
+    if (now < order.deliveredAt) return "OutForDelivery";
+    return "Delivered";
   }
 
   function statusBadge(status) {
+    if (status === "OutForDelivery") return "Out for Delivery";
     if (status === "out_for_delivery") return "Out for Delivery";
-    return status.replace(/_/g, " ");
+    return String(status || "").replace(/_/g, " ");
   }
 
   function updateOrderStatuses(now = Date.now()) {
@@ -1199,93 +1400,126 @@
     }
   }
 
-  function placeSingleItemOrder(itemId) {
+  async function refreshRotatingShop(force = false) {
+    if (!hasServerSession() && !localAuthMode) return;
+    if (!force && serverShopSlots.length) return;
+    try {
+      const resp = await fetch("/api/shop", { cache: "no-store" });
+      if (!resp.ok) throw new Error(`Shop fetch failed (${resp.status})`);
+      const data = await resp.json();
+      serverShopSlots = Array.isArray(data.slots) ? data.slots : [];
+      serverShopLastUpdatedAt = data.lastUpdatedAt || Date.now();
+      serverReachable = true;
+    } catch {
+      serverReachable = false;
+    }
+  }
+
+  async function refreshServerOrders() {
+    if (!hasServerSession()) return;
+    try {
+      const data = await postJson("/api/orders/list", {
+        username: serverSession.username,
+        password: serverSession.password
+      });
+      serverOrders = Array.isArray(data.orders) ? data.orders : [];
+      const progressResp = await postJson("/api/progress/load", {
+        username: serverSession.username,
+        password: serverSession.password
+      });
+      if (progressResp?.progress && typeof progressResp.progress === "object") {
+        const progress = progressResp.progress;
+        if (typeof progress.bankBalance === "number") state.bankBalance = progress.bankBalance;
+        if (progress.inventory && typeof progress.inventory === "object") state.inventory = progress.inventory;
+        if (typeof progress.totalEarned === "number") state.totalEarned = progress.totalEarned;
+        if (progress.upgrades && typeof progress.upgrades === "object") state.upgrades = progress.upgrades;
+        if (progress.ownedBusinesses && typeof progress.ownedBusinesses === "object") state.ownedBusinesses = progress.ownedBusinesses;
+      }
+      serverReachable = true;
+    } catch {
+      serverReachable = false;
+    }
+  }
+
+  async function trackOrderByTrackingId() {
+    const trackingId = String(dom.trackingSearchInput?.value || "").trim();
+    if (!trackingId) return;
+    if (!hasServerSession()) {
+      toast("Log in to track cloud orders.");
+      return;
+    }
+    try {
+      const data = await postJson("/api/orders/track", {
+        username: serverSession.username,
+        password: serverSession.password,
+        trackingId
+      });
+      if (data?.order) {
+        const existing = serverOrders.findIndex((x) => x.orderId === data.order.orderId);
+        if (existing >= 0) serverOrders[existing] = data.order;
+        else serverOrders.unshift(data.order);
+        selectedTrackOrderId = data.order.orderId;
+        render();
+      }
+    } catch (err) {
+      toast(err.message || "Tracking lookup failed.");
+    }
+  }
+
+  async function placeSingleItemOrder(itemId, preferredSlotId = "") {
     if (purchaseLock) return;
     purchaseLock = true;
     try {
       const item = itemById(itemId);
       if (!item) return;
 
-      const qty = 1;
-      const subtotal = item.price * qty;
-      const shippingFee = 15;
-      const total = subtotal + shippingFee;
+      if (hasServerSession()) {
+        await flushServerMirrorSave();
+        await refreshRotatingShop(true);
+        const slot = serverShopSlots.find((s) => s.slotId === preferredSlotId && s.itemId && Number(s.expiresAt) > Date.now())
+          || serverShopSlots.find((s) => s.itemId === itemId && Number(s.expiresAt) > Date.now());
+        if (!slot) {
+          toast("This shop slot expired. Refreshing.");
+          await refreshRotatingShop(true);
+          render();
+          return;
+        }
 
-      if (state.bankBalance < total) {
-        toast("Not enough money for this order.");
+        const data = await postJson("/api/shop/buy", {
+          username: serverSession.username,
+          password: serverSession.password,
+          slotId: slot.slotId
+        });
+        await refreshRotatingShop(true);
+        if (typeof data.bankBalance === "number") state.bankBalance = data.bankBalance;
+        const purchasedId = String(data.purchasedItem?.itemId || slot.itemId || "");
+        if (purchasedId) {
+          const itemDef = itemById(purchasedId);
+          if (!state.inventory[purchasedId]) state.inventory[purchasedId] = { qty: 0 };
+          const cap = itemDef?.maxStack || 99;
+          state.inventory[purchasedId].qty = Math.min(cap, Number(state.inventory[purchasedId].qty || 0) + 1);
+        }
+        addTx("store_purchase", -slot.price, { item: slot.name, rarity: slot.rarity, via: "server" });
+        saveState();
+        render();
+        toast(`Purchased ${data.purchasedItem?.name || slot.name}.`);
         return;
       }
 
-      const now = Date.now();
-      const shippedAt = now + randInt(30 * 1000, 2 * 60 * 1000);
-      const outForDeliveryAt = shippedAt + randInt(60 * 1000, 5 * 60 * 1000);
-      const deliveredAt = outForDeliveryAt + randInt(60 * 1000, 5 * 60 * 1000);
-
-      const orderId = uniqueId("ord");
-      const carrier = CARRIERS[randInt(0, CARRIERS.length - 1)];
-
-      state.bankBalance -= total;
-      state.orders[orderId] = {
-        id: orderId,
-        createdAt: now,
-        status: "processing",
-        items: [{ itemId: item.id, name: item.name, qty, price: item.price }],
-        subtotal,
-        shippingFee,
-        total,
-        trackingNumber: trackingNumber(),
-        carrier,
-        estimatedDeliveryAt: deliveredAt,
-        shippedAt,
-        outForDeliveryAt,
-        deliveredAt,
-        lastStatusUpdateAt: now,
-        deliveredClaimedToInventory: false
-      };
-
-      addTx("store_purchase", -total, { orderId, item: item.name, qty, subtotal, shippingFee });
-      selectedTrackOrderId = orderId;
+      if (state.bankBalance < item.price) {
+        toast("Not enough money for this item.");
+        return;
+      }
+      state.bankBalance -= item.price;
+      if (!state.inventory[item.id]) state.inventory[item.id] = { qty: 0 };
+      state.inventory[item.id].qty = Math.min(item.maxStack || 99, state.inventory[item.id].qty + 1);
+      addTx("store_purchase", -item.price, { item: item.name, via: "local" });
 
       saveState();
       render();
-      toast(`Order placed. Tracking: ${state.orders[orderId].trackingNumber}`);
+      toast(`Purchased ${item.name}.`);
     } finally {
       purchaseLock = false;
-    }
-  }
-
-  function claimOrderItems(orderId) {
-    if (orderClaimLocks.has(orderId)) return;
-
-    const order = state.orders[orderId];
-    if (!order) return;
-
-    const now = Date.now();
-    if (deriveOrderStatus(order, now) !== "delivered") {
-      toast("Package not delivered yet.");
-      return;
-    }
-    if (order.deliveredClaimedToInventory) {
-      toast("Items already claimed.");
-      return;
-    }
-
-    orderClaimLocks.add(orderId);
-    try {
-      for (const line of order.items) {
-        if (!state.inventory[line.itemId]) state.inventory[line.itemId] = { qty: 0 };
-        state.inventory[line.itemId].qty += line.qty;
-      }
-      order.deliveredClaimedToInventory = true;
-      order.status = "delivered";
-      order.lastStatusUpdateAt = now;
-
-      addTx("order_claim", 0, { orderId, items: order.items.map((i) => `${i.name}x${i.qty}`).join(", ") });
-      saveState();
-      render();
-      toast("Order claimed into inventory.");
-    } finally {
-      orderClaimLocks.delete(orderId);
     }
   }
 
@@ -1520,39 +1754,137 @@
       dom.skillsPanel.appendChild(row);
     });
 
+    dom.businessMoneyBar.textContent = `Money ${fmtMoney(state.bankBalance)} | Total Earned ${fmtMoney(state.totalEarned || 0)}`;
     dom.businessPanel.innerHTML = "";
     BUSINESSES.forEach((biz) => {
-      const ent = businessEntry(biz.id);
+      const unlocked = isBusinessUnlocked(biz);
+      const ent = businessEntry(biz.id, false) || { level: 0, lastPaidAt: now, hasManager: false };
       const cost = businessUpgradeCost(biz, ent.level);
+      const intervalMs = businessIntervalMs(biz);
+      const payout = businessPayoutPerInterval(biz, { ...ent, level: Math.max(1, ent.level || 1) }, getModifiers(now));
+      const timeLeft = ent.level > 0 ? Math.max(0, (Number(ent.lastPaidAt || now) + intervalMs) - now) : intervalMs;
+      const progressRatio = ent.level > 0 ? Math.max(0, Math.min(1, (now - Number(ent.lastPaidAt || now)) / intervalMs)) : 0;
+
       const row = document.createElement("div");
-      row.className = "item-row";
-      row.innerHTML = `<div class="row-head"><strong>${biz.name}</strong><span>Lvl ${ent.level}/5</span></div><div class="row-meta">Upgrade ${fmtMoney(cost)} | interval ${fmtDur(biz.intervalMs)}</div>`;
+      row.className = `item-row business-tile${unlocked ? "" : " locked"}`;
+      row.innerHTML = `
+        <div class="row-head">
+          <strong>${biz.icon || "🏪"} ${biz.name}</strong>
+          <span>${ent.level || 0}/5</span>
+        </div>
+        <div class="business-badges">
+          <span class="chip">Cost ${fmtMoney(cost)}</span>
+          <span class="chip">Payout ${fmtMoney(Math.max(0, payout))}</span>
+          <span class="chip">Timer ${fmtDur(timeLeft)}</span>
+          ${unlocked ? "" : `<span class="chip">Locked</span>`}
+        </div>
+        <div class="business-progress"><span style="width:${Math.round(progressRatio * 100)}%"></span></div>
+        <div class="row-meta">
+          ${unlocked
+            ? `Unlock target met. Interval ${fmtDur(intervalMs)}${ent.hasManager ? " | Manager active (+5% payout)" : ""}`
+            : `Unlock at Total Earned ${fmtMoney(biz.unlockValue || 0)}`}
+        </div>
+      `;
+
       const btn = document.createElement("button");
       btn.className = "btn secondary";
-      btn.textContent = ent.level === 0 ? "Buy" : "Upgrade";
-      btn.disabled = ent.level >= 5 || state.bankBalance < cost;
+      btn.textContent = unlocked
+        ? (ent.level === 0 ? "Buy" : (ent.level >= 5 ? "Running" : "Upgrade"))
+        : "Coming Soon";
+      btn.disabled = !unlocked || ent.level >= 5 || state.bankBalance < cost;
       btn.onclick = () => buyOrUpgradeBusiness(biz.id);
       row.appendChild(btn);
       dom.businessPanel.appendChild(row);
     });
+
+    dom.businessUpgradesPanel.innerHTML = "";
+    BUSINESS_UPGRADES.forEach((upgrade) => {
+      const owned = Boolean(state.upgrades[upgrade.id]);
+      const row = document.createElement("div");
+      row.className = "item-row";
+      row.innerHTML = `
+        <div class="row-head"><strong>${upgrade.name}</strong><span>${owned ? "Owned" : fmtMoney(upgrade.cost)}</span></div>
+        <div class="row-meta">${upgrade.desc}</div>
+      `;
+      const btn = document.createElement("button");
+      btn.className = "btn secondary";
+      btn.textContent = owned ? "Purchased" : "Buy Upgrade";
+      btn.disabled = owned || state.bankBalance < upgrade.cost;
+      btn.onclick = () => buyBusinessUpgrade(upgrade.id);
+      row.appendChild(btn);
+      dom.businessUpgradesPanel.appendChild(row);
+    });
+
+    dom.businessManagersPanel.innerHTML = "";
+    BUSINESSES.forEach((biz) => {
+      const ent = businessEntry(biz.id, false) || { level: 0, hasManager: false };
+      const unlocked = isBusinessUnlocked(biz);
+      const row = document.createElement("div");
+      row.className = "item-row";
+      const cost = managerCostForBusiness(biz);
+      row.innerHTML = `
+        <div class="row-head"><strong>${biz.icon || "🏪"} ${biz.name}</strong><span>${ent.hasManager ? "Hired" : fmtMoney(cost)}</span></div>
+        <div class="row-meta">${!unlocked ? "Locked business" : ent.level <= 0 ? "Own this business first." : "Manager auto-runs this business (+5% payout)."}</div>
+      `;
+      const btn = document.createElement("button");
+      btn.className = "btn secondary";
+      btn.textContent = ent.hasManager ? "Manager Active" : "Hire Manager";
+      btn.disabled = !unlocked || ent.level <= 0 || ent.hasManager || state.bankBalance < cost;
+      btn.onclick = () => hireBusinessManager(biz.id);
+      row.appendChild(btn);
+      dom.businessManagersPanel.appendChild(row);
+    });
+
+    dom.businessStatsPanel.innerHTML = `
+      <div class="item-row">
+        <div class="row-head"><strong>Business Stats</strong><span>Overview</span></div>
+        <div class="row-meta">Total Earned: ${fmtMoney(state.totalEarned || 0)}</div>
+        <div class="row-meta">Owned Businesses: ${BUSINESSES.filter((b) => (businessEntry(b.id, false)?.level || 0) > 0).length}/${BUSINESSES.length}</div>
+        <div class="row-meta">Managers Hired: ${BUSINESSES.filter((b) => businessEntry(b.id, false)?.hasManager).length}</div>
+      </div>
+    `;
 
     dom.coinFlipStats.textContent = `Wins: ${state.casinoStats.wins} | Losses: ${state.casinoStats.losses}`;
   }
 
   function renderStore() {
     dom.storeList.innerHTML = "";
-    ITEM_CATALOG.forEach((item) => {
+    if (hasServerSession() && !serverShopSlots.length) {
+      dom.storeList.innerHTML = "<p class='hint'>Loading rotating rarity shop...</p>";
+      return;
+    }
+    const now = Date.now();
+    dom.shopLastUpdated.textContent = `Last updated: ${fmtTs(serverShopLastUpdatedAt || now)}`;
+    const rotating = hasServerSession() && serverShopSlots.length ? serverShopSlots : ITEM_CATALOG.map((item) => ({
+      slotId: item.id,
+      itemId: item.id,
+      name: item.name,
+      rarity: item.rarity || "common",
+      price: item.price,
+      expiresAt: now + 24 * 60 * 60 * 1000,
+      purchased: false
+    }));
+
+    rotating.forEach((slot) => {
+      const item = slot.itemId ? itemById(slot.itemId) : null;
+      const icon = item?.icon || (slot.slotType === "special" ? "✨" : "📦");
+      const expiresIn = Math.max(0, Number(slot.expiresAt) - now);
+      const emptySpecial = slot.slotType === "special" && !slot.itemId;
+      const rarity = String(slot.rarity || "");
       const row = document.createElement("div");
       row.className = "item-row";
       row.innerHTML = `
-        <div class="row-head"><strong>${item.icon} ${item.name}</strong><span>${fmtMoney(item.price)}</span></div>
-        <div class="row-meta">${item.description}</div>
+        <div class="row-head"><strong>${icon} ${emptySpecial ? "No special item right now" : slot.name}</strong><span>${emptySpecial ? "--" : fmtMoney(slot.price)}</span></div>
+        <div class="row-meta">
+          ${slot.slotType === "special" ? "Special Slot" : "Normal Slot"}
+          ${emptySpecial ? "" : ` | <span class="rarity-pill ${rarity}">${statusBadge(slot.rarity)}</span> | Expires in ${fmtDur(expiresIn)}`}
+        </div>
       `;
       const btn = document.createElement("button");
       btn.className = "btn";
-      btn.textContent = "Buy (Ships)";
-      btn.disabled = purchaseLock || state.bankBalance < (item.price + 15);
-      btn.onclick = () => placeSingleItemOrder(item.id);
+      btn.textContent = "Buy";
+      btn.disabled = purchaseLock || emptySpecial || expiresIn <= 0 || state.bankBalance < Number(slot.price || 0);
+      btn.onclick = () => placeSingleItemOrder(slot.itemId, slot.slotId);
       row.appendChild(btn);
       dom.storeList.appendChild(row);
     });
@@ -1567,7 +1899,7 @@
       .sort((a, b) => a[0].localeCompare(b[0]));
 
     if (!inventoryEntries.length) {
-      dom.inventoryList.innerHTML = "<p class='hint'>No items in inventory yet. Claim delivered orders first.</p>";
+      dom.inventoryList.innerHTML = "<p class='hint'>No items in inventory yet. Delivered orders will auto-add items.</p>";
     } else {
       for (const [itemId, slot] of inventoryEntries) {
         const item = itemById(itemId);
@@ -1612,8 +1944,9 @@
 
   function renderOrders(now) {
     updateOrderStatuses(now);
-
-    const orders = Object.values(state.orders).sort((a, b) => b.createdAt - a.createdAt);
+    const orders = hasServerSession() && serverOrders.length
+      ? [...serverOrders].sort((a, b) => b.createdAt - a.createdAt)
+      : Object.values(state.orders).sort((a, b) => b.createdAt - a.createdAt);
     dom.ordersList.innerHTML = "";
 
     if (!orders.length) {
@@ -1622,22 +1955,24 @@
       return;
     }
 
-    if (!selectedTrackOrderId) selectedTrackOrderId = orders[0].id;
+    if (!selectedTrackOrderId) selectedTrackOrderId = orders[0].orderId || orders[0].id;
 
     orders.forEach((order) => {
       const status = deriveOrderStatus(order, now);
+      const statusClass = String(status).replace(/([a-z])([A-Z])/g, "$1_$2").toLowerCase();
       const row = document.createElement("div");
       row.className = "item-row";
-      const shortId = order.id.slice(-8).toUpperCase();
+      const orderId = order.orderId || order.id;
+      const shortId = String(orderId).slice(-8).toUpperCase();
       const itemsSummary = order.items.map((it) => `${it.name} x${it.qty}`).join(", ");
 
       row.innerHTML = `
         <div class="row-head">
           <strong>Order #${shortId}</strong>
-          <span class="badge ${status}">${statusBadge(status)}</span>
+          <span class="badge ${statusClass}">${statusBadge(status)}</span>
         </div>
-        <div class="row-meta">${order.carrier} • ${order.trackingNumber}</div>
-        <div class="row-meta">Created: ${fmtTs(order.createdAt)} | ETA: ${fmtTs(order.estimatedDeliveryAt)}</div>
+        <div class="row-meta">${order.carrier || "MegaShip"} • ${order.trackingId || order.trackingNumber}</div>
+        <div class="row-meta">Created: ${fmtTs(order.createdAt)} | ETA: ${fmtTs(order.etaAt || order.estimatedDeliveryAt)}</div>
         <div class="row-meta">${itemsSummary}</div>
       `;
 
@@ -1648,56 +1983,41 @@
       trackBtn.className = "btn secondary";
       trackBtn.textContent = "Track";
       trackBtn.onclick = () => {
-        selectedTrackOrderId = order.id;
+        selectedTrackOrderId = orderId;
         render();
       };
       actions.appendChild(trackBtn);
-
-      const claimBtn = document.createElement("button");
-      claimBtn.className = "btn";
-      claimBtn.textContent = order.deliveredClaimedToInventory ? "Claimed" : "Claim Items";
-      claimBtn.disabled = status !== "delivered" || order.deliveredClaimedToInventory;
-      claimBtn.onclick = () => claimOrderItems(order.id);
-      actions.appendChild(claimBtn);
 
       row.appendChild(actions);
       dom.ordersList.appendChild(row);
     });
 
-    const selected = state.orders[selectedTrackOrderId] || orders[0];
+    const selected = orders.find((o) => (o.orderId || o.id) === selectedTrackOrderId) || orders[0];
     if (!selected) {
       dom.trackPanel.innerHTML = "<p class='hint'>Select an order to track.</p>";
       return;
     }
-    selectedTrackOrderId = selected.id;
+    selectedTrackOrderId = selected.orderId || selected.id;
 
     const status = deriveOrderStatus(selected, now);
-    const steps = ["Order Placed", "Shipped", "Out for Delivery", "Delivered"];
-    const stepIndex = status === "processing" ? 1 : status === "shipped" ? 2 : status === "out_for_delivery" ? 3 : 4;
+    const stepIndex = status === "Processing" ? 1 : status === "Shipped" ? 2 : status === "OutForDelivery" ? 3 : 4;
     const progress = Math.round((stepIndex / 4) * 100);
-    const countdown = status === "delivered" ? "Delivered" : fmtDur(selected.deliveredAt - now);
+    const countdown = status === "Delivered" ? "Delivered" : fmtDur((selected.etaAt || selected.deliveredAt) - now);
 
     dom.trackPanel.innerHTML = `
-      <p><strong>${selected.carrier} ${selected.trackingNumber}</strong></p>
+      <p><strong>${selected.carrier || "MegaShip"} ${selected.trackingId || selected.trackingNumber}</strong></p>
       <p class="row-meta">Order total: ${fmtMoney(selected.total)} | Created: ${fmtTs(selected.createdAt)}</p>
-      <p class="row-meta">ETA: ${fmtTs(selected.estimatedDeliveryAt)}</p>
+      <p class="row-meta">ETA: ${fmtTs(selected.etaAt || selected.estimatedDeliveryAt)}</p>
       <div class="progress-wrap"><div class="progress-bar" style="width:${progress}%"></div></div>
       <p class="row-meta">Status: ${statusBadge(status)} | Countdown: ${countdown}</p>
       <ol class="timeline">
+        ${(selected.timeline || []).map((t) => `<li>${statusBadge(t.status)}: ${fmtTs(t.at)}</li>`).join("") || `
         <li>Order placed: ${fmtTs(selected.createdAt)}</li>
         <li>Shipped: ${fmtTs(selected.shippedAt)}</li>
         <li>Out for delivery: ${fmtTs(selected.outForDeliveryAt)}</li>
-        <li>Delivered: ${fmtTs(selected.deliveredAt)}</li>
+        <li>Delivered: ${fmtTs(selected.deliveredAt)}</li>`}
       </ol>
     `;
-
-    if (status === "delivered" && !selected.deliveredClaimedToInventory) {
-      const btn = document.createElement("button");
-      btn.className = "btn";
-      btn.textContent = "Claim Items";
-      btn.onclick = () => claimOrderItems(selected.id);
-      dom.trackPanel.appendChild(btn);
-    }
   }
 
   function renderLog() {
@@ -1752,8 +2072,15 @@
   function tick30s() {
     opportunityCheck();
     processPassiveIncome();
+    if (hasServerSession()) refreshServerOrders();
     saveState();
     render();
+  }
+
+  function tick12s() {
+    if (hasServerSession()) {
+      refreshRotatingShop(true).then(() => render());
+    }
   }
 
   function setActiveTab(name) {
@@ -1771,6 +2098,20 @@
     }
   }
 
+  function setBusinessTab(name) {
+    activeBusinessTab = name;
+    const tabs = {
+      businesses: [dom.bizTabBusinessesBtn, dom.bizPanelBusinesses],
+      upgrades: [dom.bizTabUpgradesBtn, dom.bizPanelUpgrades],
+      managers: [dom.bizTabManagersBtn, dom.bizPanelManagers],
+      stats: [dom.bizTabStatsBtn, dom.bizPanelStats]
+    };
+    for (const [key, [btn, panel]] of Object.entries(tabs)) {
+      if (btn) btn.classList.toggle("active", key === name);
+      if (panel) panel.classList.toggle("hidden", key !== name);
+    }
+  }
+
   function resetSave() {
     if (!confirm("Reset all progress?")) return;
     localStorage.removeItem(STORAGE_KEY);
@@ -1784,6 +2125,10 @@
     dom.tabStoreBtn.onclick = () => setActiveTab("store");
     dom.tabInventoryBtn.onclick = () => setActiveTab("inventory");
     dom.tabOrdersBtn.onclick = () => setActiveTab("orders");
+    dom.bizTabBusinessesBtn.onclick = () => setBusinessTab("businesses");
+    dom.bizTabUpgradesBtn.onclick = () => setBusinessTab("upgrades");
+    dom.bizTabManagersBtn.onclick = () => setBusinessTab("managers");
+    dom.bizTabStatsBtn.onclick = () => setBusinessTab("stats");
 
     dom.claimMainJobBtn.onclick = claimMainJob;
     dom.claimQuickTaskBtn.onclick = claimQuickTask;
@@ -1795,6 +2140,7 @@
     dom.buyTrainingBtn.onclick = buyTrainingPoint;
     dom.buyParallelUpgradeBtn.onclick = buyParallelUpgrade;
     dom.coinFlipBtn.onclick = coinFlip;
+    dom.trackingSearchBtn.onclick = trackOrderByTrackingId;
 
     dom.saveNowBtn.onclick = () => {
       saveState();
@@ -1813,12 +2159,18 @@
 
     opportunityCheck();
     processPassiveIncome();
+    if (hasServerSession()) {
+      refreshRotatingShop(true);
+      refreshServerOrders();
+    }
 
     wire();
     setActiveTab("bank");
+    setBusinessTab(activeBusinessTab);
     render();
 
     tick1sHandle = setInterval(tick1s, 1000);
+    tick12sHandle = setInterval(tick12s, 12000);
     tick30sHandle = setInterval(tick30s, 30000);
     gameStarted = true;
   }
@@ -1827,6 +2179,11 @@
     showAuthScreen();
     bindAuthEvents();
     setSaveStatus("saved", "local");
+    const rememberedUsername = localStorage.getItem("server_shop_username") || "";
+    const rememberedPassword = sessionStorage.getItem("server_shop_password") || "";
+    if (rememberedUsername && rememberedPassword) {
+      setServerSession(rememberedUsername, rememberedPassword);
+    }
 
     await initFirebaseServices();
 
