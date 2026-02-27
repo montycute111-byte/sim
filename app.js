@@ -77,12 +77,12 @@
   const CARRIERS = ["USPS", "UPS", "FedEx", "DHL", "MegaShip"];
 
   const BUSINESSES = [
-    { id: "lemonade", name: "Lemonade Stand", icon: "🍋", baseCost: 10000, intervalMs: 3 * 1000, basePayout: 50, unlockType: "totalEarned", unlockValue: 0 },
-    { id: "hotdog", name: "Hotdog Stand", icon: "🌭", baseCost: 25000, intervalMs: 3 * 1000, basePayout: 120, unlockType: "totalEarned", unlockValue: 500 },
-    { id: "pizza", name: "Pizza Delivery", icon: "🍕", baseCost: 75000, intervalMs: 3 * 1000, basePayout: 260, unlockType: "totalEarned", unlockValue: 2500 },
-    { id: "coffee_shop", name: "Coffee Shop", icon: "☕", baseCost: 150000, intervalMs: 3 * 1000, basePayout: 420, unlockType: "totalEarned", unlockValue: 8000 },
-    { id: "film_studio", name: "Film Studio", icon: "🎬", baseCost: 600000, intervalMs: 3 * 1000, basePayout: 1400, unlockType: "totalEarned", unlockValue: 25000 },
-    { id: "firm", name: "Investment Firm", icon: "🏦", baseCost: 1000000, intervalMs: 3 * 1000, basePayout: 0, unlockType: "totalEarned", unlockValue: 70000 }
+    { id: "lemonade", name: "Lemonade Stand", icon: "🍋", baseCost: 10000, intervalMs: 2 * 60 * 1000, basePayout: 50, unlockType: "totalEarned", unlockValue: 0 },
+    { id: "hotdog", name: "Hotdog Stand", icon: "🌭", baseCost: 25000, intervalMs: 2 * 60 * 1000, basePayout: 120, unlockType: "totalEarned", unlockValue: 500 },
+    { id: "pizza", name: "Pizza Delivery", icon: "🍕", baseCost: 75000, intervalMs: 2 * 60 * 1000, basePayout: 260, unlockType: "totalEarned", unlockValue: 2500 },
+    { id: "coffee_shop", name: "Coffee Shop", icon: "☕", baseCost: 150000, intervalMs: 2 * 60 * 1000, basePayout: 420, unlockType: "totalEarned", unlockValue: 8000 },
+    { id: "film_studio", name: "Film Studio", icon: "🎬", baseCost: 600000, intervalMs: 2 * 60 * 1000, basePayout: 1400, unlockType: "totalEarned", unlockValue: 25000 },
+    { id: "firm", name: "Investment Firm", icon: "🏦", baseCost: 1000000, intervalMs: 2 * 60 * 1000, basePayout: 0, unlockType: "totalEarned", unlockValue: 70000 }
   ];
 
   const BUSINESS_UPGRADES = [
@@ -1180,7 +1180,7 @@
   }
 
   function businessIntervalMs(biz) {
-    return Math.max(3 * 1000, Math.round(biz.intervalMs * businessGlobalSpeedMult()));
+    return Math.max(2 * 60 * 1000, Math.round(biz.intervalMs * businessGlobalSpeedMult()));
   }
 
   function businessPayoutPerInterval(biz, ent, mods) {
@@ -1490,17 +1490,12 @@
         });
         await refreshRotatingShop(true);
         if (typeof data.bankBalance === "number") state.bankBalance = data.bankBalance;
-        const purchasedId = String(data.purchasedItem?.itemId || slot.itemId || "");
-        if (purchasedId) {
-          const itemDef = itemById(purchasedId);
-          if (!state.inventory[purchasedId]) state.inventory[purchasedId] = { qty: 0 };
-          const cap = itemDef?.maxStack || 99;
-          state.inventory[purchasedId].qty = Math.min(cap, Number(state.inventory[purchasedId].qty || 0) + 1);
-        }
-        addTx("store_purchase", -slot.price, { item: slot.name, rarity: slot.rarity, via: "server" });
+        addTx("store_order", -slot.price, { item: slot.name, rarity: slot.rarity, via: "server", trackingId: data.trackingId });
+        await refreshServerOrders();
+        if (data.orderId) selectedTrackOrderId = data.orderId;
         saveState();
         render();
-        toast(`Purchased ${data.purchasedItem?.name || slot.name}.`);
+        toast(`Order placed. Tracking: ${data.trackingId || "pending"}`);
         return;
       }
 
