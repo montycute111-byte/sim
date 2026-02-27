@@ -1271,14 +1271,6 @@
     const mods = getModifiers(now);
     let changed = false;
 
-    if (!state.passiveCapWindowStart || now - state.passiveCapWindowStart >= 60 * 60 * 1000) {
-      state.passiveCapWindowStart = now;
-      state.passiveEarnedInWindow = 0;
-    }
-
-    const cap = Math.max(15000, Math.floor(expectedActiveHourly() * 0.35));
-    let capLeft = Math.max(0, cap - state.passiveEarnedInWindow);
-
     for (const biz of BUSINESSES) {
       const ent = state.ownedBusinesses[biz.id];
       if (!ent || ent.level <= 0) continue;
@@ -1295,21 +1287,17 @@
         total = Math.round(total * (1 + mods.payoutBonusNextN));
         consumePayoutBonusUses();
       }
-      if (total > capLeft) total = capLeft;
       if (total <= 0) {
         ent.lastPaidAt = now;
         continue;
       }
 
       state.bankBalance += total;
-      state.passiveEarnedInWindow += total;
-      capLeft -= total;
       ent.lastPaidAt = now;
       ent.needsRestart = false;
 
       addTx("passive_income", total, { business: biz.name, intervals });
       changed = true;
-      if (capLeft <= 0) break;
     }
 
     return changed;
