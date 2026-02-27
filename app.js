@@ -77,12 +77,12 @@
   const CARRIERS = ["USPS", "UPS", "FedEx", "DHL", "MegaShip"];
 
   const BUSINESSES = [
-    { id: "lemonade", name: "Lemonade Stand", icon: "🍋", baseCost: 10000, intervalMs: 10 * 1000, basePayout: 50, unlockType: "totalEarned", unlockValue: 0 },
-    { id: "hotdog", name: "Hotdog Stand", icon: "🌭", baseCost: 25000, intervalMs: 30 * 1000, basePayout: 120, unlockType: "totalEarned", unlockValue: 500 },
-    { id: "pizza", name: "Pizza Delivery", icon: "🍕", baseCost: 75000, intervalMs: 60 * 1000, basePayout: 260, unlockType: "totalEarned", unlockValue: 2500 },
-    { id: "coffee_shop", name: "Coffee Shop", icon: "☕", baseCost: 150000, intervalMs: 2 * 60 * 1000, basePayout: 420, unlockType: "totalEarned", unlockValue: 8000 },
-    { id: "film_studio", name: "Film Studio", icon: "🎬", baseCost: 600000, intervalMs: 3 * 60 * 1000, basePayout: 1400, unlockType: "totalEarned", unlockValue: 25000 },
-    { id: "firm", name: "Investment Firm", icon: "🏦", baseCost: 1000000, intervalMs: 5 * 60 * 1000, basePayout: 0, unlockType: "totalEarned", unlockValue: 70000 }
+    { id: "lemonade", name: "Lemonade Stand", icon: "🍋", baseCost: 10000, intervalMs: 3 * 1000, basePayout: 50, unlockType: "totalEarned", unlockValue: 0 },
+    { id: "hotdog", name: "Hotdog Stand", icon: "🌭", baseCost: 25000, intervalMs: 3 * 1000, basePayout: 120, unlockType: "totalEarned", unlockValue: 500 },
+    { id: "pizza", name: "Pizza Delivery", icon: "🍕", baseCost: 75000, intervalMs: 4 * 1000, basePayout: 260, unlockType: "totalEarned", unlockValue: 2500 },
+    { id: "coffee_shop", name: "Coffee Shop", icon: "☕", baseCost: 150000, intervalMs: 4 * 1000, basePayout: 420, unlockType: "totalEarned", unlockValue: 8000 },
+    { id: "film_studio", name: "Film Studio", icon: "🎬", baseCost: 600000, intervalMs: 5 * 1000, basePayout: 1400, unlockType: "totalEarned", unlockValue: 25000 },
+    { id: "firm", name: "Investment Firm", icon: "🏦", baseCost: 1000000, intervalMs: 5 * 1000, basePayout: 0, unlockType: "totalEarned", unlockValue: 70000 }
   ];
 
   const BUSINESS_UPGRADES = [
@@ -165,6 +165,7 @@
     skillsPanel: document.getElementById("skillsPanel"),
     businessPanel: document.getElementById("businessPanel"),
     businessMoneyBar: document.getElementById("businessMoneyBar"),
+    restartBusinessesBtn: document.getElementById("restartBusinessesBtn"),
     bizTabBusinessesBtn: document.getElementById("bizTabBusinessesBtn"),
     bizTabUpgradesBtn: document.getElementById("bizTabUpgradesBtn"),
     bizTabManagersBtn: document.getElementById("bizTabManagersBtn"),
@@ -392,12 +393,13 @@
     if (!merged.ownedBusinesses || typeof merged.ownedBusinesses !== "object") merged.ownedBusinesses = {};
     for (const [bizId, val] of Object.entries(merged.ownedBusinesses)) {
       if (!val || typeof val !== "object") {
-        merged.ownedBusinesses[bizId] = { level: 0, lastPaidAt: Date.now(), hasManager: false };
+        merged.ownedBusinesses[bizId] = { level: 0, lastPaidAt: Date.now(), hasManager: false, needsRestart: false };
         continue;
       }
       if (!Number.isFinite(val.level)) val.level = 0;
       if (!Number.isFinite(val.lastPaidAt)) val.lastPaidAt = Date.now();
       if (typeof val.hasManager !== "boolean") val.hasManager = false;
+      if (typeof val.needsRestart !== "boolean") val.needsRestart = false;
     }
     if (!Array.isArray(merged.activeJobs)) {
       merged.activeJobs = [];
@@ -1141,7 +1143,7 @@
 
   function businessEntry(id, createIfMissing = true) {
     if (!state.ownedBusinesses[id] && createIfMissing) {
-      state.ownedBusinesses[id] = { level: 0, lastPaidAt: Date.now(), hasManager: false };
+      state.ownedBusinesses[id] = { level: 0, lastPaidAt: Date.now(), hasManager: false, needsRestart: false };
     }
     return state.ownedBusinesses[id];
   }
@@ -1255,6 +1257,23 @@
     render();
   }
 
+  function restartAllBusinesses() {
+    const now = Date.now();
+    let restarted = 0;
+    for (const biz of BUSINESSES) {
+      const ent = businessEntry(biz.id, false);
+      if (!ent || ent.level <= 0) continue;
+      ent.lastPaidAt = now;
+      ent.needsRestart = false;
+      restarted += 1;
+    }
+    if (restarted > 0) {
+      saveState();
+      render();
+      toast(`Restarted ${restarted} business timer${restarted === 1 ? "" : "s"}.`);
+    }
+  }
+
   function expectedActiveHourly() {
     const lvlFactor = 1 + state.bankLevel * 0.15;
     return Math.round(2200 * lvlFactor);
@@ -1275,12 +1294,13 @@
     for (const biz of BUSINESSES) {
       const ent = state.ownedBusinesses[biz.id];
       if (!ent || ent.level <= 0) continue;
+      if (ent.needsRestart) continue;
 
       const last = ent.lastPaidAt || now;
       const intervalMs = businessIntervalMs(biz);
       let intervals = Math.floor((now - last) / intervalMs);
       if (intervals <= 0) continue;
-      intervals = Math.min(intervals, 6);
+      intervals = 1;
 
       let payoutEach = businessPayoutPerInterval(biz, ent, mods);
 
@@ -1299,6 +1319,7 @@
       state.passiveEarnedInWindow += total;
       capLeft -= total;
       ent.lastPaidAt = now;
+      ent.needsRestart = true;
 
       addTx("passive_income", total, { business: biz.name, intervals });
       if (capLeft <= 0) break;
@@ -1762,8 +1783,13 @@
       const cost = businessUpgradeCost(biz, ent.level);
       const intervalMs = businessIntervalMs(biz);
       const payout = businessPayoutPerInterval(biz, { ...ent, level: Math.max(1, ent.level || 1) }, getModifiers(now));
-      const timeLeft = ent.level > 0 ? Math.max(0, (Number(ent.lastPaidAt || now) + intervalMs) - now) : intervalMs;
-      const progressRatio = ent.level > 0 ? Math.max(0, Math.min(1, (now - Number(ent.lastPaidAt || now)) / intervalMs)) : 0;
+      const needsRestart = Boolean(ent.needsRestart);
+      const timeLeft = ent.level > 0
+        ? (needsRestart ? 0 : Math.max(0, (Number(ent.lastPaidAt || now) + intervalMs) - now))
+        : intervalMs;
+      const progressRatio = ent.level > 0
+        ? (needsRestart ? 1 : Math.max(0, Math.min(1, (now - Number(ent.lastPaidAt || now)) / intervalMs)))
+        : 0;
 
       const row = document.createElement("div");
       row.className = `item-row business-tile${unlocked ? "" : " locked"}`;
@@ -1781,7 +1807,7 @@
         <div class="business-progress"><span style="width:${Math.round(progressRatio * 100)}%"></span></div>
         <div class="row-meta">
           ${unlocked
-            ? `Unlock target met. Interval ${fmtDur(intervalMs)}${ent.hasManager ? " | Manager active (+5% payout)" : ""}`
+            ? `Unlock target met. Interval ${fmtDur(intervalMs)}${ent.hasManager ? " | Manager active (+5% payout)" : ""}${needsRestart ? " | Ready: press Restart All" : ""}`
             : `Unlock at Total Earned ${fmtMoney(biz.unlockValue || 0)}`}
         </div>
       `;
@@ -2139,6 +2165,7 @@
 
     dom.buyTrainingBtn.onclick = buyTrainingPoint;
     dom.buyParallelUpgradeBtn.onclick = buyParallelUpgrade;
+    dom.restartBusinessesBtn.onclick = restartAllBusinesses;
     dom.coinFlipBtn.onclick = coinFlip;
     dom.trackingSearchBtn.onclick = trackOrderByTrackingId;
 
