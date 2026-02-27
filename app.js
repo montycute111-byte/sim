@@ -1269,6 +1269,7 @@
   function processPassiveIncome() {
     const now = Date.now();
     const mods = getModifiers(now);
+    let changed = false;
 
     if (!state.passiveCapWindowStart || now - state.passiveCapWindowStart >= 60 * 60 * 1000) {
       state.passiveCapWindowStart = now;
@@ -1307,8 +1308,11 @@
       ent.needsRestart = false;
 
       addTx("passive_income", total, { business: biz.name, intervals });
+      changed = true;
       if (capLeft <= 0) break;
     }
+
+    return changed;
   }
 
   function claimDailyBonus() {
@@ -2072,9 +2076,16 @@
 
   function tick1s() {
     const now = Date.now();
+    let shouldSave = false;
     if (state.streakWindowUntil && now > state.streakWindowUntil) {
       state.mainStreak = 0;
       state.streakWindowUntil = null;
+      shouldSave = true;
+    }
+    if (processPassiveIncome()) {
+      shouldSave = true;
+    }
+    if (shouldSave) {
       saveState();
     }
     render();
@@ -2082,7 +2093,6 @@
 
   function tick30s() {
     opportunityCheck();
-    processPassiveIncome();
     if (hasServerSession()) refreshServerOrders();
     saveState();
     render();
