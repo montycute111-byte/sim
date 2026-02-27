@@ -1258,20 +1258,7 @@
   }
 
   function restartAllBusinesses() {
-    const now = Date.now();
-    let restarted = 0;
-    for (const biz of BUSINESSES) {
-      const ent = businessEntry(biz.id, false);
-      if (!ent || ent.level <= 0) continue;
-      ent.lastPaidAt = now;
-      ent.needsRestart = false;
-      restarted += 1;
-    }
-    if (restarted > 0) {
-      saveState();
-      render();
-      toast(`Restarted ${restarted} business timer${restarted === 1 ? "" : "s"}.`);
-    }
+    toast("Businesses auto-restart now.");
   }
 
   function expectedActiveHourly() {
@@ -1294,13 +1281,11 @@
     for (const biz of BUSINESSES) {
       const ent = state.ownedBusinesses[biz.id];
       if (!ent || ent.level <= 0) continue;
-      if (ent.needsRestart) continue;
-
       const last = ent.lastPaidAt || now;
       const intervalMs = businessIntervalMs(biz);
       let intervals = Math.floor((now - last) / intervalMs);
       if (intervals <= 0) continue;
-      intervals = 1;
+      intervals = Math.min(intervals, 6);
 
       let payoutEach = businessPayoutPerInterval(biz, ent, mods);
 
@@ -1319,7 +1304,7 @@
       state.passiveEarnedInWindow += total;
       capLeft -= total;
       ent.lastPaidAt = now;
-      ent.needsRestart = true;
+      ent.needsRestart = false;
 
       addTx("passive_income", total, { business: biz.name, intervals });
       if (capLeft <= 0) break;
@@ -1783,7 +1768,7 @@
       const cost = businessUpgradeCost(biz, ent.level);
       const intervalMs = businessIntervalMs(biz);
       const payout = businessPayoutPerInterval(biz, { ...ent, level: Math.max(1, ent.level || 1) }, getModifiers(now));
-      const needsRestart = Boolean(ent.needsRestart);
+      const needsRestart = false;
       const timeLeft = ent.level > 0
         ? (needsRestart ? 0 : Math.max(0, (Number(ent.lastPaidAt || now) + intervalMs) - now))
         : intervalMs;
@@ -1807,7 +1792,7 @@
         <div class="business-progress"><span style="width:${Math.round(progressRatio * 100)}%"></span></div>
         <div class="row-meta">
           ${unlocked
-            ? `Unlock target met. Interval ${fmtDur(intervalMs)}${ent.hasManager ? " | Manager active (+5% payout)" : ""}${needsRestart ? " | Ready: press Restart All" : ""}`
+            ? `Unlock target met. Interval ${fmtDur(intervalMs)}${ent.hasManager ? " | Manager active (+5% payout)" : ""} | Auto restart on`
             : `Unlock at Total Earned ${fmtMoney(biz.unlockValue || 0)}`}
         </div>
       `;
