@@ -135,19 +135,47 @@
         </div>
 
         <div class="grid two">
-          <article class="card">
-            <h2>Businesses</h2>
-            <p class="hint">Passive income is capped to keep active jobs strongest.</p>
-            <div id="businessPanel" class="list"></div>
-          </article>
+          <article class="card business-workspace">
+            <div class="business-layout">
+              <aside class="business-sidebar">
+                <button id="bizTabBusinessesBtn" class="biz-tab-btn active">Businesses</button>
+                <button id="bizTabUpgradesBtn" class="biz-tab-btn">Upgrades</button>
+                <button id="bizTabManagersBtn" class="biz-tab-btn">Managers</button>
+                <button id="bizTabStatsBtn" class="biz-tab-btn">Stats</button>
+              </aside>
 
-          <article class="card">
-            <h2>Coin Flip</h2>
-            <p id="coinFlipStats">Wins: 0 | Losses: 0</p>
-            <label for="coinBetInput">Bet</label>
-            <input id="coinBetInput" type="number" min="1" step="1" value="100" />
-            <button id="coinFlipBtn" class="btn">Flip Coin</button>
-            <p class="hint" id="coinFlipHint"></p>
+              <section class="business-main">
+                <div class="business-head">
+                  <h2>Businesses</h2>
+                  <div id="businessMoneyBar" class="business-money">$0</div>
+                </div>
+
+                <div id="bizPanelBusinesses" class="biz-panel">
+                  <p class="hint">Passive income is capped to keep active jobs strongest.</p>
+                  <div id="businessPanel" class="list"></div>
+                </div>
+
+                <div id="bizPanelUpgrades" class="biz-panel hidden">
+                  <div id="businessUpgradesPanel" class="list"></div>
+                </div>
+
+                <div id="bizPanelManagers" class="biz-panel hidden">
+                  <div id="businessManagersPanel" class="list"></div>
+                </div>
+
+                <div id="bizPanelStats" class="biz-panel hidden">
+                  <div id="businessStatsPanel" class="list"></div>
+                  <article class="card">
+                    <h3>Coin Flip</h3>
+                    <p id="coinFlipStats">Wins: 0 | Losses: 0</p>
+                    <label for="coinBetInput">Bet</label>
+                    <input id="coinBetInput" type="number" min="1" step="1" value="100" />
+                    <button id="coinFlipBtn" class="btn">Flip Coin</button>
+                    <p class="hint" id="coinFlipHint"></p>
+                  </article>
+                </div>
+              </section>
+            </div>
           </article>
         </div>
       </section>
@@ -155,7 +183,8 @@
       <section id="storeTab" class="tab-panel hidden">
         <article class="card">
           <h2>Item Store</h2>
-          <p class="hint">Orders ship over time. Delivered orders must be claimed into inventory.</p>
+          <p class="hint">Rotating rarity shop with timed slots.</p>
+          <p id="shopLastUpdated" class="hint">Last updated: --</p>
           <div id="storeList" class="list"></div>
         </article>
       </section>
