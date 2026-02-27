@@ -43,7 +43,7 @@
       description: "Cuts cooldown and duration for a short burst.",
       maxStack: 25,
       icon: "⚡",
-      boost: { type: "cooldownReduction", value: 0.12, durationMs: 3 * 60 * 1000 }
+      boost: { type: "cooldownReduction", value: 0.12, durationMs: 21 * 60 * 60 * 1000 }
     },
     {
       id: "coffee",
@@ -52,7 +52,7 @@
       description: "Boosts payout multiplier for 4 minutes.",
       maxStack: 25,
       icon: "☕",
-      boost: { type: "moneyMultiplier", value: 0.10, durationMs: 4 * 60 * 1000 }
+      boost: { type: "moneyMultiplier", value: 0.10, durationMs: 21 * 60 * 60 * 1000 }
     },
     {
       id: "protein_bar",
@@ -61,7 +61,7 @@
       description: "Adds payout bonus for next 4 payout events.",
       maxStack: 20,
       icon: "🍫",
-      boost: { type: "payoutBonusNextN", value: 0.08, durationMs: 20 * 60 * 1000, remainingUses: 4 }
+      boost: { type: "payoutBonusNextN", value: 0.08, durationMs: 21 * 60 * 60 * 1000, remainingUses: 4 }
     },
     {
       id: "lucky_coin",
@@ -70,7 +70,7 @@
       description: "Improves risky outcome odds for 6 minutes.",
       maxStack: 15,
       icon: "🪙",
-      boost: { type: "luckBonus", value: 0.08, durationMs: 6 * 60 * 1000 }
+      boost: { type: "luckBonus", value: 0.08, durationMs: 21 * 60 * 60 * 1000 }
     }
   ];
 
