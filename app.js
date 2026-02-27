@@ -805,6 +805,20 @@
     }, 700);
   }
 
+
+  function flushPendingSavesNow() {
+    if (localAuthMode) {
+      saveLocalState();
+      return;
+    }
+    if (firebaseReady && currentUid && cloudDirty && !saveInFlight) {
+      flushCloudSave();
+    }
+    if (hasServerSession()) {
+      flushServerMirrorSave();
+    }
+  }
+
   function showAuthScreen() {
     dom.authScreen.classList.remove("hidden");
     dom.gameScreen.classList.add("hidden");
@@ -1163,15 +1177,23 @@
         throw new Error("Username is already taken.");
       }
 
-      tx.set(userRef, {
+      const nextUserDoc = {
+        email: user.email || existing?.email || "",
         username: usernameLower,
         usernameLower,
         displayName: existing?.displayName || usernameLower,
         createdAt: existing?.createdAt || firebaseApi.serverTimestamp(),
+        updatedAt: firebaseApi.serverTimestamp(),
         lastActiveAt: firebaseApi.serverTimestamp(),
         balance: Number(existing?.balance ?? state.bankBalance ?? 0),
         blocked: existing?.blocked || {}
-      }, { merge: true });
+      };
+
+      if (existing?.gameState && typeof existing.gameState === "object") {
+        nextUserDoc.gameState = existing.gameState;
+      }
+
+      tx.set(userRef, nextUserDoc, { merge: true });
 
       tx.set(usernameRef, { uid, createdAt: firebaseApi.serverTimestamp() }, { merge: true });
       if (oldUsername && oldUsername !== usernameLower) {
@@ -3632,6 +3654,11 @@
   async function init() {
     showAuthScreen();
     bindAuthEvents();
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") flushPendingSavesNow();
+    });
+    window.addEventListener("pagehide", flushPendingSavesNow);
+    window.addEventListener("beforeunload", flushPendingSavesNow);
     setSaveStatus("saved", "local");
     const rememberedUsername = localStorage.getItem("server_shop_username") || "";
     const rememberedPassword = sessionStorage.getItem("server_shop_password") || "";
@@ -3671,4 +3698,3 @@
 
   init();
 })();
-
