@@ -922,7 +922,13 @@
   }
 
   async function initFirebaseServices() {
-    if (location.protocol === "file:") {
+    const isLocalLikeContext =
+      location.protocol === "file:" ||
+      location.protocol === "about:" ||
+      !/^https?:$/.test(location.protocol) ||
+      location.origin === "null";
+
+    if (isLocalLikeContext) {
       localAuthMode = false;
       dom.setupMessage.textContent = "Cloud login is disabled on file://. Local username/password login works for testing on this device, or use your deployed URL for cross-device saves.";
       return;
@@ -963,7 +969,8 @@
     }
 
     try {
-      const mod = await import("./firebase.js");
+      const firebaseModuleUrl = new URL("./firebase.js", window.location.href).href;
+      const mod = await import(firebaseModuleUrl);
       const result = mod.initFirebase();
       if (!result.ok) {
         dom.setupMessage.textContent = result.message;
@@ -1025,16 +1032,22 @@
       startSocialListeners();
     }
 
-    const uname = user.email ? user.email.split("@")[0] : "Player";
-    dom.whoami.textContent = `Signed in as ${uname}`;
-    if (hasServerSession()) {
-      await flushServerMirrorSave();
-      await refreshRotatingShop(true);
-      await refreshServerOrders();
+    try {
+      const uname = user.email ? user.email.split("@")[0] : "Player";
+      dom.whoami.textContent = `Signed in as ${uname}`;
+      if (hasServerSession()) {
+        await flushServerMirrorSave();
+        await refreshRotatingShop(true);
+        await refreshServerOrders();
+      }
+      showGameScreen();
+      if (!gameStarted) startGame();
+      else render();
+    } catch (err) {
+      console.error("Post-login startup failed:", err);
+      setAuthError(err?.message || "Login succeeded but the app failed to load.");
+      showAuthScreen();
     }
-    showGameScreen();
-    if (!gameStarted) startGame();
-    else render();
   }
 
   function getCurrentUid() {
@@ -2184,7 +2197,8 @@
   }
 
   function businessUpgradeCost(biz, level) {
-    return 1000;
+    const currentLevel = Math.max(0, Math.floor(Number(level || 0)));
+    return 1000 * (currentLevel + 1);
   }
 
   function managerCostForBusiness(biz) {
@@ -3305,7 +3319,10 @@
       row.className = "item-row";
       const orderId = order.orderId || order.id;
       const shortId = String(orderId).slice(-8).toUpperCase();
-      const itemsSummary = order.items.map((it) => `${it.name} x${it.qty}`).join(", ");
+      const safeItems = Array.isArray(order.items) ? order.items : [];
+      const itemsSummary = safeItems.length
+        ? safeItems.map((it) => `${it?.name || it?.itemId || "Item"} x${it?.qty || 1}`).join(", ")
+        : "No item details";
 
       row.innerHTML = `
         <div class="row-head">
@@ -3361,8 +3378,8 @@
     const countdown = status === "Delivered" ? "Delivered" : fmtDur((selected.etaAt || selected.deliveredAt) - now);
 
     dom.trackPanel.innerHTML = `
-      <p><strong>${selected.carrier || "MegaShip"} ${selected.trackingId || selected.trackingNumber}</strong></p>
-      <p class="row-meta">Order total: ${fmtMoney(selected.total)} | Created: ${fmtTs(selected.createdAt)}</p>
+      <p><strong>${selected.carrier || "MegaShip"} ${selected.trackingId || selected.trackingNumber || "No Tracking"}</strong></p>
+      <p class="row-meta">Order total: ${fmtMoney(Number(selected.total || 0))} | Created: ${fmtTs(selected.createdAt)}</p>
       <p class="row-meta">ETA: ${fmtTs(selected.etaAt || selected.estimatedDeliveryAt)}</p>
       <div class="progress-wrap"><div class="progress-bar" style="width:${progress}%"></div></div>
       <p class="row-meta">Status: ${statusBadge(status)} | Countdown: ${countdown}${selected.deliveredClaimedToInventory ? " | Claimed to inventory" : ""}</p>
