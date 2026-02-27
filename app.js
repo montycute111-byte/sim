@@ -77,12 +77,12 @@
   const CARRIERS = ["USPS", "UPS", "FedEx", "DHL", "MegaShip"];
 
   const BUSINESSES = [
-    { id: "lemonade", name: "Lemonade Stand", icon: "🍋", baseCost: 10000, intervalMs: 10 * 60 * 1000, basePayout: 50, unlockType: "totalEarned", unlockValue: 0 },
-    { id: "hotdog", name: "Hotdog Stand", icon: "🌭", baseCost: 25000, intervalMs: 10 * 60 * 1000, basePayout: 120, unlockType: "totalEarned", unlockValue: 500 },
-    { id: "pizza", name: "Pizza Delivery", icon: "🍕", baseCost: 75000, intervalMs: 10 * 60 * 1000, basePayout: 260, unlockType: "totalEarned", unlockValue: 2500 },
-    { id: "coffee_shop", name: "Coffee Shop", icon: "☕", baseCost: 150000, intervalMs: 10 * 60 * 1000, basePayout: 420, unlockType: "totalEarned", unlockValue: 8000 },
-    { id: "film_studio", name: "Film Studio", icon: "🎬", baseCost: 600000, intervalMs: 20 * 60 * 1000, basePayout: 1400, unlockType: "totalEarned", unlockValue: 25000 },
-    { id: "firm", name: "Investment Firm", icon: "🏦", baseCost: 1000000, intervalMs: 60 * 60 * 1000, basePayout: 0, unlockType: "totalEarned", unlockValue: 70000 }
+    { id: "lemonade", name: "Lemonade Stand", icon: "🍋", baseCost: 10000, intervalMs: 10 * 1000, basePayout: 50, unlockType: "totalEarned", unlockValue: 0 },
+    { id: "hotdog", name: "Hotdog Stand", icon: "🌭", baseCost: 25000, intervalMs: 30 * 1000, basePayout: 120, unlockType: "totalEarned", unlockValue: 500 },
+    { id: "pizza", name: "Pizza Delivery", icon: "🍕", baseCost: 75000, intervalMs: 60 * 1000, basePayout: 260, unlockType: "totalEarned", unlockValue: 2500 },
+    { id: "coffee_shop", name: "Coffee Shop", icon: "☕", baseCost: 150000, intervalMs: 2 * 60 * 1000, basePayout: 420, unlockType: "totalEarned", unlockValue: 8000 },
+    { id: "film_studio", name: "Film Studio", icon: "🎬", baseCost: 600000, intervalMs: 3 * 60 * 1000, basePayout: 1400, unlockType: "totalEarned", unlockValue: 25000 },
+    { id: "firm", name: "Investment Firm", icon: "🏦", baseCost: 1000000, intervalMs: 5 * 60 * 1000, basePayout: 0, unlockType: "totalEarned", unlockValue: 70000 }
   ];
 
   const BUSINESS_UPGRADES = [
