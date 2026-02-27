@@ -1024,29 +1024,55 @@
       if (!localAuthMode) await loadUserGameState(user.uid);
       else replaceState(loadLocalState());
       balanceDisplay = state.bankBalance;
-    } catch {
-      // keep local state
-    }
-    if (!localAuthMode && firebaseReady) {
-      await ensureUserProfileRecord(user);
-      startSocialListeners();
+    } catch (err) {
+      console.error("State load failed during auth:", err);
     }
 
     try {
       const uname = user.email ? user.email.split("@")[0] : "Player";
       dom.whoami.textContent = `Signed in as ${uname}`;
-      if (hasServerSession()) {
-        await flushServerMirrorSave();
-        await refreshRotatingShop(true);
-        await refreshServerOrders();
-      }
       showGameScreen();
       if (!gameStarted) startGame();
       else render();
+      setAuthError("");
     } catch (err) {
       console.error("Post-login startup failed:", err);
       setAuthError(err?.message || "Login succeeded but the app failed to load.");
       showAuthScreen();
+      return;
+    }
+
+    if (!localAuthMode && firebaseReady) {
+      try {
+        await ensureUserProfileRecord(user);
+      } catch (err) {
+        console.error("Profile sync failed:", err);
+        toast(`Profile sync failed: ${err?.message || "unknown error"}`);
+      }
+      try {
+        startSocialListeners();
+      } catch (err) {
+        console.error("Social listeners failed:", err);
+        toast(`Social features unavailable: ${err?.message || "unknown error"}`);
+      }
+    }
+
+    if (hasServerSession()) {
+      try {
+        await flushServerMirrorSave();
+      } catch (err) {
+        console.error("Server mirror save failed after login:", err);
+      }
+      try {
+        await refreshRotatingShop(true);
+      } catch (err) {
+        console.error("Rotating shop refresh failed after login:", err);
+      }
+      try {
+        await refreshServerOrders();
+      } catch (err) {
+        console.error("Server orders refresh failed after login:", err);
+      }
     }
   }
 
