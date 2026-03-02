@@ -337,6 +337,7 @@
   let saveTimer = null;
   let saveInFlight = false;
   let cloudDirty = false;
+  const CLOUD_SAVE_TIMEOUT_MS = 8000;
 
   let purchaseLock = false;
   let serverSession = { username: "", password: "" };
@@ -632,6 +633,23 @@
     localStorage.setItem(LOCAL_ACCOUNTS_KEY, JSON.stringify(accounts));
   }
 
+  function withTimeout(promise, ms, message) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(message));
+      }, ms);
+      Promise.resolve(promise)
+        .then((value) => {
+          clearTimeout(timer);
+          resolve(value);
+        })
+        .catch((err) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+    });
+  }
+
   async function loginLocalUser(username, password) {
     const key = String(username || "").trim().toLowerCase();
     const accounts = loadLocalAccounts();
@@ -775,7 +793,11 @@
     cloudDirty = false;
     setSaveStatus("saving");
     try {
-      await saveUserGameState(currentUid, exportGameStateForSave());
+      await withTimeout(
+        saveUserGameState(currentUid, exportGameStateForSave()),
+        CLOUD_SAVE_TIMEOUT_MS,
+        "cloud-save-timeout"
+      );
       setSaveStatus("saved");
     } catch (err) {
       cloudDirty = true;
@@ -3667,9 +3689,9 @@
     dom.coinFlipBtn.onclick = coinFlip;
     dom.trackingSearchBtn.onclick = trackOrderByTrackingId;
 
-    dom.saveNowBtn.onclick = () => {
+    dom.saveNowBtn.onclick = async () => {
       saveState();
-      if (!localAuthMode) flushCloudSave();
+      if (!localAuthMode) await flushCloudSave();
       toast("Save requested.");
     };
 
