@@ -694,13 +694,21 @@
     const data = snap.data() || {};
     const loaded = migrateState(data.gameState || {});
     if (Number.isFinite(data.balance)) loaded.bankBalance = Number(data.balance);
-    const invSnap = await firebaseApi.getDoc(inventoryDocRef(uid));
-    if (invSnap.exists()) {
-      loaded.inventory = invSnap.data()?.items && typeof invSnap.data().items === "object" ? invSnap.data().items : loaded.inventory;
+    try {
+      const invSnap = await firebaseApi.getDoc(inventoryDocRef(uid));
+      if (invSnap.exists()) {
+        loaded.inventory = invSnap.data()?.items && typeof invSnap.data().items === "object" ? invSnap.data().items : loaded.inventory;
+      }
+    } catch (err) {
+      console.warn("[cloud-load] Inventory read failed; continuing with gameState inventory.", err?.code || err?.message || err);
     }
-    const boostsSnap = await firebaseApi.getDoc(activeBoostsDocRef(uid));
-    if (boostsSnap.exists()) {
-      loaded.activeBoosts = normalizeBoostMap(boostsSnap.data()?.boosts || {});
+    try {
+      const boostsSnap = await firebaseApi.getDoc(activeBoostsDocRef(uid));
+      if (boostsSnap.exists()) {
+        loaded.activeBoosts = normalizeBoostMap(boostsSnap.data()?.boosts || {});
+      }
+    } catch (err) {
+      console.warn("[cloud-load] Active boosts read failed; continuing with gameState boosts.", err?.code || err?.message || err);
     }
     replaceState(loaded);
     saveLocalState();
@@ -710,6 +718,7 @@
   async function saveUserGameState(uid, gameState) {
     if (!firebaseReady || !uid) return;
     const userRef = firebaseApi.doc(db, "users", uid);
+    const warnings = [];
     await firebaseApi.setDoc(userRef, {
       email: auth.currentUser?.email || "",
       username: usernameFromUser(auth.currentUser),
@@ -720,7 +729,12 @@
       balance: Number(gameState.bankBalance || 0),
       gameState
     }, { merge: true });
-    await firebaseApi.setDoc(inventoryDocRef(uid), { items: gameState.inventory || {} }, { merge: true });
+    try {
+      await firebaseApi.setDoc(inventoryDocRef(uid), { items: gameState.inventory || {} }, { merge: true });
+    } catch (err) {
+      warnings.push("inventory");
+      console.warn("[cloud-save] Inventory sync failed; core save still succeeded.", err?.code || err?.message || err);
+    }
     const boostPayload = {};
     for (const [boostId, boost] of Object.entries(gameState.activeBoosts || {})) {
       const startedMs = stampMs(boost.startedAt) || Date.now();
@@ -738,10 +752,16 @@
         expiresAt: firebaseApi.Timestamp.fromMillis(endsMs)
       };
     }
-    await firebaseApi.setDoc(activeBoostsDocRef(uid), {
-      boosts: boostPayload,
-      updatedAt: firebaseApi.serverTimestamp()
-    }, { merge: true });
+    try {
+      await firebaseApi.setDoc(activeBoostsDocRef(uid), {
+        boosts: boostPayload,
+        updatedAt: firebaseApi.serverTimestamp()
+      }, { merge: true });
+    } catch (err) {
+      warnings.push("boosts");
+      console.warn("[cloud-save] Active boosts sync failed; core save still succeeded.", err?.code || err?.message || err);
+    }
+    return warnings;
   }
 
   async function flushCloudSave() {
@@ -1062,12 +1082,6 @@
       } catch (err) {
         console.error("Profile sync failed:", err);
         toast(`Profile sync failed: ${err?.message || "unknown error"}`);
-      }
-      try {
-        startSocialListeners();
-      } catch (err) {
-        console.error("Social listeners failed:", err);
-        toast(`Social features unavailable: ${err?.message || "unknown error"}`);
       }
     }
 
@@ -1526,38 +1540,63 @@
   async function runFriendSearch() {
     const uid = getCurrentUid();
     if (!firebaseReady || !uid) throw new Error("Cloud features require login on deployed site.");
-    const term = sanitizeUsername(dom.friendSearchInput?.value || "");
-    if (!term) {
+    const rawTerm = String(dom.friendSearchInput?.value || "").trim();
+    const term = sanitizeUsername(rawTerm);
+    if (!term && !rawTerm) {
       social.searchResults = [];
       renderSocialSections();
       return;
     }
     const results = [];
-    const usernameSnap = await firebaseApi.getDoc(firebaseApi.doc(db, "usernames", term));
-    if (usernameSnap.exists()) {
-      const foundUid = String(usernameSnap.data()?.uid || "");
-      if (foundUid && foundUid !== uid) results.push(foundUid);
+    if (term) {
+      try {
+        const usernameSnap = await firebaseApi.getDoc(firebaseApi.doc(db, "usernames", term));
+        if (usernameSnap.exists()) {
+          const foundUid = String(usernameSnap.data()?.uid || "");
+          if (foundUid && foundUid !== uid) results.push(foundUid);
+        }
+      } catch (err) {
+        console.warn("[friends] Username index lookup failed.", err?.code || err?.message || err);
+      }
     }
-    const prefixQ = firebaseApi.query(
-      fsCollection("users"),
-      firebaseApi.where("usernameLower", ">=", term),
-      firebaseApi.where("usernameLower", "<=", `${term}\uf8ff`),
-      firebaseApi.limit(8)
-    );
-    const displayQ = firebaseApi.query(
-      fsCollection("users"),
-      firebaseApi.where("displayName", ">=", term),
-      firebaseApi.where("displayName", "<=", `${term}\uf8ff`),
-      firebaseApi.limit(5)
-    );
-    const [snap, displaySnap] = await Promise.all([firebaseApi.getDocs(prefixQ), firebaseApi.getDocs(displayQ)]);
-    snap.forEach((d) => {
-      if (d.id !== uid && !results.includes(d.id)) results.push(d.id);
-      socialProfiles.set(d.id, d.data() || {});
-    });
-    displaySnap.forEach((d) => {
-      if (d.id !== uid && !results.includes(d.id)) results.push(d.id);
-      socialProfiles.set(d.id, d.data() || {});
+
+    const queries = [];
+    if (term) {
+      queries.push(firebaseApi.query(
+        fsCollection("users"),
+        firebaseApi.where("usernameLower", "==", term),
+        firebaseApi.limit(5)
+      ));
+      queries.push(firebaseApi.query(
+        fsCollection("users"),
+        firebaseApi.where("username", "==", term),
+        firebaseApi.limit(5)
+      ));
+      queries.push(firebaseApi.query(
+        fsCollection("users"),
+        firebaseApi.where("usernameLower", ">=", term),
+        firebaseApi.where("usernameLower", "<=", `${term}\uf8ff`),
+        firebaseApi.limit(8)
+      ));
+    }
+    if (rawTerm) {
+      queries.push(firebaseApi.query(
+        fsCollection("users"),
+        firebaseApi.where("displayName", "==", rawTerm),
+        firebaseApi.limit(5)
+      ));
+    }
+
+    const queryResults = await Promise.allSettled(queries.map((q) => firebaseApi.getDocs(q)));
+    queryResults.forEach((result) => {
+      if (result.status !== "fulfilled") {
+        console.warn("[friends] Search query failed.", result.reason?.code || result.reason?.message || result.reason);
+        return;
+      }
+      result.value.forEach((d) => {
+        if (d.id !== uid && !results.includes(d.id)) results.push(d.id);
+        socialProfiles.set(d.id, d.data() || {});
+      });
     });
     await refreshProfilesForUids(results);
     social.searchResults = results;
@@ -3574,10 +3613,7 @@
       spend: [dom.tabSpendBtn, dom.spendTab],
       store: [dom.tabStoreBtn, dom.storeTab],
       inventory: [dom.tabInventoryBtn, dom.inventoryTab],
-      orders: [dom.tabOrdersBtn, dom.ordersTab],
-      friends: [dom.tabFriendsBtn, dom.friendsTab],
-      trade: [dom.tabTradeBtn, dom.tradeTab],
-      send: [dom.tabSendBtn, dom.sendTab]
+      orders: [dom.tabOrdersBtn, dom.ordersTab]
     };
 
     for (const [key, [btn, panel]] of Object.entries(tabs)) {
@@ -3613,9 +3649,6 @@
     dom.tabStoreBtn.onclick = () => setActiveTab("store");
     dom.tabInventoryBtn.onclick = () => setActiveTab("inventory");
     dom.tabOrdersBtn.onclick = () => setActiveTab("orders");
-    dom.tabFriendsBtn.onclick = () => setActiveTab("friends");
-    dom.tabTradeBtn.onclick = () => setActiveTab("trade");
-    dom.tabSendBtn.onclick = () => setActiveTab("send");
     dom.bizTabBusinessesBtn.onclick = () => setBusinessTab("businesses");
     dom.bizTabUpgradesBtn.onclick = () => setBusinessTab("upgrades");
     dom.bizTabManagersBtn.onclick = () => setBusinessTab("managers");
@@ -3633,28 +3666,6 @@
     dom.restartBusinessesBtn.onclick = restartAllBusinesses;
     dom.coinFlipBtn.onclick = coinFlip;
     dom.trackingSearchBtn.onclick = trackOrderByTrackingId;
-    dom.friendSearchBtn.onclick = () => { runFriendSearch().catch((e) => toast(e.message || "Search failed.")); };
-    dom.friendSearchInput.onkeydown = (e) => { if (e.key === "Enter") dom.friendSearchBtn.click(); };
-    dom.sendMoneyBtn.onclick = async () => {
-      try {
-        await sendMoney(dom.sendFriendSelect.value, dom.sendAmountInput.value, dom.sendNoteInput.value);
-        toast("Money sent.");
-      } catch (e) {
-        toast(e.message || "Send failed.");
-      }
-    };
-    dom.createTradeBtn.onclick = async () => {
-      try {
-        await createTrade(
-          dom.tradeFriendSelect.value,
-          { money: dom.tradeOfferMoneyInput.value, items: parseItemMap(dom.tradeOfferItemsInput.value) },
-          { money: dom.tradeRequestMoneyInput.value, items: parseItemMap(dom.tradeRequestItemsInput.value) }
-        );
-        toast("Trade offer created.");
-      } catch (e) {
-        toast(e.message || "Trade failed.");
-      }
-    };
 
     dom.saveNowBtn.onclick = () => {
       saveState();
