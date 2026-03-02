@@ -801,7 +801,10 @@
       setSaveStatus("saved");
     } catch (err) {
       cloudDirty = true;
-      setSaveStatus(navigator.onLine ? "error" : "offline", err?.code || "");
+      setSaveStatus(
+        navigator.onLine ? "error" : "offline",
+        err?.code || err?.message || "unknown"
+      );
     } finally {
       saveInFlight = false;
       if (cloudDirty) scheduleAutosave();
