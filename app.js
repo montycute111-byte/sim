@@ -1340,6 +1340,8 @@
   }
 
   async function flushCloudSave(force = false, reason = "autosave") {
+    let rateLimited = false;
+
     if (localAuthMode) {
       saveLocalState();
       setSaveStatus("saved", "local");
@@ -1358,8 +1360,11 @@
 
     const now = Date.now();
     if (nextCloudSaveAllowedAt && now < nextCloudSaveAllowedAt) {
-      if (cloudDirty) scheduleAutosave(reason);
       setSaveStatus("offline", "backoff");
+      logSaveEvent("backoff-skip", {
+        reason,
+        retryInMs: nextCloudSaveAllowedAt - now
+      });
       return;
     }
 
@@ -1409,9 +1414,10 @@
           cloudDirty = true;
           const detail = err?.code || err?.message || "cloud-save-failed";
           if (isRateLimitError(err)) {
+            rateLimited = true;
             registerRateLimit(reason, detail);
             saveInFlight = false;
-            if (cloudDirty && nextCloudSaveAllowedAt) scheduleAutosave(reason);
+            logSaveEvent("rate-limited", { reason, detail, target: "rest" });
             return;
           }
           setSaveStatus(
@@ -1455,6 +1461,7 @@
       cloudDirty = true;
       const detail = err?.code || err?.message || "unknown";
       if (isRateLimitError(err)) {
+        rateLimited = true;
         registerRateLimit(reason, detail);
         return;
       }
@@ -1465,7 +1472,7 @@
       logSaveEvent("error", { reason, detail, status: err?.status || null });
     } finally {
       saveInFlight = false;
-      if (cloudDirty) scheduleAutosave(reason);
+      if (cloudDirty && !rateLimited) scheduleAutosave(reason);
     }
   }
 
@@ -1495,8 +1502,12 @@
     if (saveInFlight) {
       return;
     }
-    const timing = getAutosaveTimings(reason);
     const now = Date.now();
+    if (nextCloudSaveAllowedAt && now < nextCloudSaveAllowedAt) {
+      setSaveStatus("offline", "backoff");
+      return;
+    }
+    const timing = getAutosaveTimings(reason);
     const nextAt = Math.max(
       now + timing.debounceMs,
       lastCloudSaveAt ? lastCloudSaveAt + timing.minIntervalMs : 0,
