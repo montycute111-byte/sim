@@ -351,6 +351,8 @@
   const CLOUD_SAVE_TIMEOUT_MS = 8000;
   const CLOUD_SAVE_DEBOUNCE_MS = 1200;
   const CLOUD_SAVE_MIN_INTERVAL_MS = 8000;
+  const BACKGROUND_SAVE_DEBOUNCE_MS = 5000;
+  const BACKGROUND_SAVE_MIN_INTERVAL_MS = 60000;
   const CLOUD_SAVE_MAX_BACKOFF_MS = 60000;
   let lastCloudSaveAt = 0;
   let nextCloudSaveAllowedAt = 0;
@@ -518,6 +520,23 @@
     const base = Math.min(CLOUD_SAVE_MAX_BACKOFF_MS, 1000 * Math.pow(2, backoffAttemptCount));
     const jitterFactor = 0.8 + (Math.random() * 0.4);
     return Math.min(CLOUD_SAVE_MAX_BACKOFF_MS, Math.max(1000, Math.floor(base * jitterFactor)));
+  }
+
+  function isBackgroundSaveReason(reason = "") {
+    return reason === "tick1s" || reason === "tick30s";
+  }
+
+  function getAutosaveTimings(reason = "") {
+    if (isBackgroundSaveReason(reason)) {
+      return {
+        debounceMs: BACKGROUND_SAVE_DEBOUNCE_MS,
+        minIntervalMs: BACKGROUND_SAVE_MIN_INTERVAL_MS
+      };
+    }
+    return {
+      debounceMs: CLOUD_SAVE_DEBOUNCE_MS,
+      minIntervalMs: CLOUD_SAVE_MIN_INTERVAL_MS
+    };
   }
 
   function renderSaveStatus() {
@@ -1352,10 +1371,11 @@
     if (saveInFlight) {
       return;
     }
+    const timing = getAutosaveTimings(reason);
     const now = Date.now();
     const nextAt = Math.max(
-      now + CLOUD_SAVE_DEBOUNCE_MS,
-      lastCloudSaveAt ? lastCloudSaveAt + CLOUD_SAVE_MIN_INTERVAL_MS : 0,
+      now + timing.debounceMs,
+      lastCloudSaveAt ? lastCloudSaveAt + timing.minIntervalMs : 0,
       nextCloudSaveAllowedAt || 0
     );
     if (saveTimer && saveScheduledAt && saveScheduledAt <= nextAt) {
