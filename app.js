@@ -339,6 +339,11 @@
   let cloudDirty = false;
   let authActionInFlight = false;
   const CLOUD_SAVE_TIMEOUT_MS = 8000;
+  const CLOUD_SAVE_DEBOUNCE_MS = 15000;
+  const CLOUD_SAVE_MIN_INTERVAL_MS = 15000;
+  const CLOUD_SAVE_BACKOFF_MS = 60000;
+  let lastCloudSaveAt = 0;
+  let nextCloudSaveAllowedAt = 0;
 
   let purchaseLock = false;
   let serverSession = { username: "", password: "" };
@@ -571,6 +576,22 @@
 
   async function restLoadUserDocument(uid) {
     if (isHostedContext()) {
+      if (hasServerSession()) {
+        try {
+          const data = await postJson("/api/progress/load", {
+            username: serverSession.username,
+            password: serverSession.password
+          });
+          if (data && Object.prototype.hasOwnProperty.call(data, "document")) {
+            return data.document || null;
+          }
+        } catch (err) {
+          if (err?.status && err.status !== 404) {
+            // Fall through to the auth-header proxy path.
+          }
+        }
+      }
+
       try {
         const data = await postJson("/api/progress/load", { uid }, await getAuthApiHeaders());
         if (data && Object.prototype.hasOwnProperty.call(data, "document")) {
@@ -600,6 +621,18 @@
 
   async function restSaveUserDocument(uid, gameState) {
     if (isHostedContext()) {
+      if (hasServerSession()) {
+        try {
+          return await postJson("/api/progress/save", {
+            username: serverSession.username,
+            password: serverSession.password,
+            progress: gameState
+          });
+        } catch (err) {
+          // Fall through to the auth-header proxy path.
+        }
+      }
+
       try {
         return await postJson("/api/progress/save", {
           uid,
@@ -811,7 +844,9 @@
   function withTimeout(promise, ms, message) {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        reject(new Error(message));
+        const err = new Error(message);
+        err.code = message;
+        reject(err);
       }, ms);
       Promise.resolve(promise)
         .then((value) => {
@@ -859,7 +894,7 @@
   function saveState() {
     saveLocalState();
     scheduleAutosave();
-    scheduleServerMirrorSave();
+    if (!hasServerSession()) scheduleServerMirrorSave();
   }
 
   async function loadUserGameState(uid) {
@@ -946,14 +981,68 @@
     }, { merge: true });
   }
 
-  async function flushCloudSave() {
+  async function flushCloudSave(force = false) {
     if (localAuthMode) {
       saveLocalState();
       setSaveStatus("saved", "local");
       return;
     }
 
+    const now = Date.now();
+    if (nextCloudSaveAllowedAt && now < nextCloudSaveAllowedAt) {
+      saveLocalState();
+      setSaveStatus("offline", `rate-limited; retry in ${fmtDur(nextCloudSaveAllowedAt - now)}`);
+      if (cloudDirty) scheduleAutosave();
+      return;
+    }
+
+    if (hasServerSession()) {
+      if (!force && lastCloudSaveAt && (now - lastCloudSaveAt) < CLOUD_SAVE_MIN_INTERVAL_MS) {
+        if (cloudDirty) scheduleAutosave();
+        return;
+      }
+      setSaveStatus("saving");
+      try {
+        await withTimeout(
+          postJson("/api/progress/save", {
+            username: serverSession.username,
+            password: serverSession.password,
+            progress: exportGameStateForSave()
+          }),
+          5000,
+          "server-save-timeout"
+        );
+        cloudDirty = false;
+        lastCloudSaveAt = Date.now();
+        nextCloudSaveAllowedAt = 0;
+        serverReachable = true;
+        saveLocalState();
+        setSaveStatus("saved", "server");
+        return;
+      } catch (err) {
+        cloudDirty = true;
+        serverReachable = false;
+        const detail = err?.code || err?.message || "server-save-failed";
+        if (String(detail).includes("RESOURCE_EXHAUSTED")) {
+          nextCloudSaveAllowedAt = Date.now() + CLOUD_SAVE_BACKOFF_MS;
+          saveLocalState();
+          setSaveStatus("offline", `rate-limited; retry in ${fmtDur(CLOUD_SAVE_BACKOFF_MS)}`);
+          scheduleAutosave();
+          return;
+        }
+        setSaveStatus(
+          navigator.onLine ? "error" : "offline",
+          detail
+        );
+        return;
+      }
+    }
+
     if (firebaseReady && currentUid && auth?.currentUser) {
+      if (!force && lastCloudSaveAt && (now - lastCloudSaveAt) < CLOUD_SAVE_MIN_INTERVAL_MS) {
+        if (cloudDirty) scheduleAutosave();
+        return;
+      }
       setSaveStatus("saving");
       try {
         await withTimeout(
@@ -962,6 +1051,8 @@
           "rest-save-timeout"
         );
         cloudDirty = false;
+        lastCloudSaveAt = Date.now();
+        nextCloudSaveAllowedAt = 0;
         saveLocalState();
         setSaveStatus("saved", "cloud");
         return;
@@ -970,9 +1061,17 @@
         // and direct REST fallback. Do not drop into the SDK timeout path.
         if (isHostedContext()) {
           cloudDirty = true;
+          const detail = err?.code || err?.message || "cloud-save-failed";
+          if (String(detail).includes("RESOURCE_EXHAUSTED")) {
+            nextCloudSaveAllowedAt = Date.now() + CLOUD_SAVE_BACKOFF_MS;
+            saveLocalState();
+            setSaveStatus("offline", `rate-limited; retry in ${fmtDur(CLOUD_SAVE_BACKOFF_MS)}`);
+            scheduleAutosave();
+            return;
+          }
           setSaveStatus(
             navigator.onLine ? "error" : "offline",
-            err?.code || err?.message || "cloud-save-failed"
+            detail
           );
           return;
         }
@@ -995,12 +1094,21 @@
         CLOUD_SAVE_TIMEOUT_MS,
         "cloud-save-timeout"
       );
+      lastCloudSaveAt = Date.now();
+      nextCloudSaveAllowedAt = 0;
       setSaveStatus("saved");
     } catch (err) {
       cloudDirty = true;
+      const detail = err?.code || err?.message || "unknown";
+      if (String(detail).includes("RESOURCE_EXHAUSTED")) {
+        nextCloudSaveAllowedAt = Date.now() + CLOUD_SAVE_BACKOFF_MS;
+        saveLocalState();
+        setSaveStatus("offline", `rate-limited; retry in ${fmtDur(CLOUD_SAVE_BACKOFF_MS)}`);
+        return;
+      }
       setSaveStatus(
         navigator.onLine ? "error" : "offline",
-        err?.code || err?.message || "unknown"
+        detail
       );
     } finally {
       saveInFlight = false;
@@ -1014,15 +1122,21 @@
       setSaveStatus("saved", "local");
       return;
     }
-    if (!firebaseReady || !currentUid) {
+    if ((!firebaseReady || !currentUid) && !hasServerSession()) {
       if (localAuthMode) setSaveStatus("saved", "local");
       return;
     }
     cloudDirty = true;
     clearTimeout(saveTimer);
+    const now = Date.now();
+    const nextAt = Math.max(
+      now + CLOUD_SAVE_DEBOUNCE_MS,
+      lastCloudSaveAt ? lastCloudSaveAt + CLOUD_SAVE_MIN_INTERVAL_MS : 0,
+      nextCloudSaveAllowedAt || 0
+    );
     saveTimer = setTimeout(() => {
       flushCloudSave();
-    }, 500);
+    }, Math.max(0, nextAt - now));
   }
 
   async function flushServerMirrorSave() {
@@ -1053,11 +1167,8 @@
       saveLocalState();
       return;
     }
-    if (firebaseReady && currentUid && cloudDirty && !saveInFlight) {
+    if (cloudDirty && !saveInFlight && (hasServerSession() || (firebaseReady && currentUid))) {
       flushCloudSave();
-    }
-    if (hasServerSession()) {
-      flushServerMirrorSave();
     }
   }
 
@@ -3923,7 +4034,7 @@
 
     dom.saveNowBtn.onclick = async () => {
       saveState();
-      if (!localAuthMode) await flushCloudSave();
+      if (!localAuthMode) await flushCloudSave(true);
       toast("Save requested.");
     };
 
