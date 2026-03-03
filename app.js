@@ -704,30 +704,12 @@
         balance: Number(initial.bankBalance || 0),
         gameState: initial
       }, { merge: true });
-      await firebaseApi.setDoc(inventoryDocRef(uid), { items: initial.inventory || {} }, { merge: true });
-      await firebaseApi.setDoc(activeBoostsDocRef(uid), { boosts: {}, updatedAt: firebaseApi.serverTimestamp() }, { merge: true });
       setSaveStatus("saved");
       return;
     }
     const data = snap.data() || {};
     const loaded = migrateState(data.gameState || {});
     if (Number.isFinite(data.balance)) loaded.bankBalance = Number(data.balance);
-    try {
-      const invSnap = await firebaseApi.getDoc(inventoryDocRef(uid));
-      if (invSnap.exists()) {
-        loaded.inventory = invSnap.data()?.items && typeof invSnap.data().items === "object" ? invSnap.data().items : loaded.inventory;
-      }
-    } catch (err) {
-      console.warn("[cloud-load] Inventory read failed; continuing with gameState inventory.", err?.code || err?.message || err);
-    }
-    try {
-      const boostsSnap = await firebaseApi.getDoc(activeBoostsDocRef(uid));
-      if (boostsSnap.exists()) {
-        loaded.activeBoosts = normalizeBoostMap(boostsSnap.data()?.boosts || {});
-      }
-    } catch (err) {
-      console.warn("[cloud-load] Active boosts read failed; continuing with gameState boosts.", err?.code || err?.message || err);
-    }
     replaceState(loaded);
     saveLocalState();
     setSaveStatus("saved");
@@ -736,7 +718,6 @@
   async function saveUserGameState(uid, gameState) {
     if (!firebaseReady || !uid) return;
     const userRef = firebaseApi.doc(db, "users", uid);
-    const warnings = [];
     await firebaseApi.setDoc(userRef, {
       email: auth.currentUser?.email || "",
       username: usernameFromUser(auth.currentUser),
@@ -747,39 +728,6 @@
       balance: Number(gameState.bankBalance || 0),
       gameState
     }, { merge: true });
-    try {
-      await firebaseApi.setDoc(inventoryDocRef(uid), { items: gameState.inventory || {} }, { merge: true });
-    } catch (err) {
-      warnings.push("inventory");
-      console.warn("[cloud-save] Inventory sync failed; core save still succeeded.", err?.code || err?.message || err);
-    }
-    const boostPayload = {};
-    for (const [boostId, boost] of Object.entries(gameState.activeBoosts || {})) {
-      const startedMs = stampMs(boost.startedAt) || Date.now();
-      const endsMs = stampMs(boost.endsAt) || (startedMs + POWER_DURATION_MS);
-      boostPayload[boostId] = {
-        id: boost.id || boostId,
-        itemId: boost.itemId || boostId,
-        name: boost.name || POWER_ITEM_BY_ID[boost.itemId || boostId]?.name || boostId,
-        type: boost.type || "custom",
-        value: Number(boost.value || 0),
-        stacks: Math.max(1, Math.floor(Number(boost.stacks || 1))),
-        meta: boost.meta && typeof boost.meta === "object" ? boost.meta : {},
-        remainingUses: boost.remainingUses !== undefined ? Math.max(0, Math.floor(Number(boost.remainingUses || 0))) : null,
-        purchasedAt: firebaseApi.Timestamp.fromMillis(startedMs),
-        expiresAt: firebaseApi.Timestamp.fromMillis(endsMs)
-      };
-    }
-    try {
-      await firebaseApi.setDoc(activeBoostsDocRef(uid), {
-        boosts: boostPayload,
-        updatedAt: firebaseApi.serverTimestamp()
-      }, { merge: true });
-    } catch (err) {
-      warnings.push("boosts");
-      console.warn("[cloud-save] Active boosts sync failed; core save still succeeded.", err?.code || err?.message || err);
-    }
-    return warnings;
   }
 
   async function flushCloudSave() {
@@ -1105,8 +1053,7 @@
       try {
         await ensureUserProfileRecord(user);
       } catch (err) {
-        console.error("Profile sync failed:", err);
-        toast(`Profile sync failed: ${err?.message || "unknown error"}`);
+        console.warn("Profile sync skipped:", err?.code || err?.message || err);
       }
     }
 
@@ -1239,41 +1186,14 @@
     const uid = user.uid;
     const usernameLower = usernameFromUser(user);
     const userRef = userDocRef(uid);
-    const usernameRef = fsDoc("usernames", usernameLower);
-
-    await firebaseApi.runTransaction(db, async (tx) => {
-      const userSnap = await tx.get(userRef);
-      const existing = userSnap.exists() ? userSnap.data() : {};
-      const oldUsername = sanitizeUsername(existing?.usernameLower || existing?.username || "");
-      const usernameSnap = await tx.get(usernameRef);
-
-      if (usernameSnap.exists() && String(usernameSnap.data()?.uid || "") !== uid) {
-        throw new Error("Username is already taken.");
-      }
-
-      const nextUserDoc = {
-        email: user.email || existing?.email || "",
-        username: usernameLower,
-        usernameLower,
-        displayName: existing?.displayName || usernameLower,
-        createdAt: existing?.createdAt || firebaseApi.serverTimestamp(),
-        updatedAt: firebaseApi.serverTimestamp(),
-        lastActiveAt: firebaseApi.serverTimestamp(),
-        balance: Number(existing?.balance ?? state.bankBalance ?? 0),
-        blocked: existing?.blocked || {}
-      };
-
-      if (existing?.gameState && typeof existing.gameState === "object") {
-        nextUserDoc.gameState = existing.gameState;
-      }
-
-      tx.set(userRef, nextUserDoc, { merge: true });
-
-      tx.set(usernameRef, { uid, createdAt: firebaseApi.serverTimestamp() }, { merge: true });
-      if (oldUsername && oldUsername !== usernameLower) {
-        tx.delete(fsDoc("usernames", oldUsername));
-      }
-    });
+    await firebaseApi.setDoc(userRef, {
+      email: user.email || "",
+      username: usernameLower,
+      usernameLower,
+      displayName: usernameLower,
+      updatedAt: firebaseApi.serverTimestamp(),
+      lastActiveAt: firebaseApi.serverTimestamp()
+    }, { merge: true });
   }
 
   async function refreshProfilesForUids(uids) {
