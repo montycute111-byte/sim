@@ -358,6 +358,7 @@
 
   let purchaseLock = false;
   let serverSession = { username: "", password: "" };
+  let progressApiProxyAvailable = null;
   let serverShopSlots = [];
   let serverShopLastUpdatedAt = null;
   let serverOrders = [];
@@ -601,6 +602,10 @@
     return window.location.protocol === "http:" || window.location.protocol === "https:";
   }
 
+  function canUseProgressApiProxy() {
+    return isHostedContext() && progressApiProxyAvailable !== false;
+  }
+
   function encodeFirestoreValue(value) {
     if (value === null || value === undefined) return { nullValue: null };
     if (Array.isArray(value)) {
@@ -682,15 +687,18 @@
   }
 
   async function restLoadUserDocument(uid) {
-    if (isHostedContext()) {
+    if (canUseProgressApiProxy()) {
       if (firebaseReady && auth?.currentUser) {
         try {
           const data = await postJson("/api/progress/load", { uid }, await getAuthApiHeaders());
+          progressApiProxyAvailable = true;
           if (data && Object.prototype.hasOwnProperty.call(data, "document")) {
             return data.document || null;
           }
         } catch (err) {
-          // Skip the username/password proxy when the authenticated save path exists.
+          if (err?.status === 404) {
+            progressApiProxyAvailable = false;
+          }
         }
       } else if (hasServerSession()) {
         try {
@@ -698,12 +706,13 @@
             username: serverSession.username,
             password: serverSession.password
           });
+          progressApiProxyAvailable = true;
           if (data && Object.prototype.hasOwnProperty.call(data, "document")) {
             return data.document || null;
           }
         } catch (err) {
-          if (err?.status && err.status !== 404) {
-            // Fall back to direct Firestore REST only when the same-origin proxy fails.
+          if (err?.status === 404) {
+            progressApiProxyAvailable = false;
           }
         }
       }
@@ -725,24 +734,38 @@
   }
 
   async function restSaveUserDocument(uid, gameState) {
-    if (isHostedContext()) {
+    if (canUseProgressApiProxy()) {
       if (firebaseReady && auth?.currentUser) {
-        return postJson("/api/progress/save", {
-          uid,
-          username: usernameFromUser(auth.currentUser),
-          email: auth.currentUser?.email || "",
-          balance: Number(gameState.bankBalance || 0),
-          gameState
-        }, await getAuthApiHeaders());
+        try {
+          const data = await postJson("/api/progress/save", {
+            uid,
+            username: usernameFromUser(auth.currentUser),
+            email: auth.currentUser?.email || "",
+            balance: Number(gameState.bankBalance || 0),
+            gameState
+          }, await getAuthApiHeaders());
+          progressApiProxyAvailable = true;
+          return data;
+        } catch (err) {
+          if (err?.status !== 404) {
+            throw err;
+          }
+          progressApiProxyAvailable = false;
+        }
       } else if (hasServerSession()) {
         try {
-          return await postJson("/api/progress/save", {
+          const data = await postJson("/api/progress/save", {
             username: serverSession.username,
             password: serverSession.password,
             progress: gameState
           });
+          progressApiProxyAvailable = true;
+          return data;
         } catch (err) {
-          // Fall back to direct Firestore REST only when the same-origin proxy fails.
+          if (err?.status !== 404) {
+            throw err;
+          }
+          progressApiProxyAvailable = false;
         }
       }
     }
