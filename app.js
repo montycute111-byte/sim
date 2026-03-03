@@ -339,11 +339,13 @@
   let saveStatusTimer = null;
   let saveInFlight = false;
   let cloudDirty = false;
+  let saveTraceLogged = false;
   let saveScheduledAt = 0;
   let pendingSaveReason = "";
   let pendingCloudSnapshot = null;
   let lastSaveAttemptAt = 0;
   let backoffAttemptCount = 0;
+  const saveRequestTimestamps = [];
   let cloudHydrationInFlight = false;
   let authActionInFlight = false;
   const CLOUD_SAVE_TIMEOUT_MS = 8000;
@@ -513,8 +515,8 @@
 
   function computeBackoffDelayMs() {
     const base = Math.min(CLOUD_SAVE_MAX_BACKOFF_MS, 1000 * Math.pow(2, backoffAttemptCount));
-    const jitter = Math.floor(Math.random() * Math.max(250, Math.floor(base * 0.25)));
-    return Math.min(CLOUD_SAVE_MAX_BACKOFF_MS, base + jitter);
+    const jitterFactor = 0.8 + (Math.random() * 0.4);
+    return Math.min(CLOUD_SAVE_MAX_BACKOFF_MS, Math.max(1000, Math.floor(base * jitterFactor)));
   }
 
   function renderSaveStatus() {
@@ -1003,7 +1005,7 @@
     return pendingCloudSnapshot;
   }
 
-  function saveState(reason = "state-change") {
+  function requestSaveInternal(reason = "state-change") {
     saveLocalState();
     if (localAuthMode) {
       setSaveStatus("saved", "local");
@@ -1018,6 +1020,39 @@
     if (hasServerSession() && firebaseReady && currentUid && auth?.currentUser) {
       scheduleServerMirrorSave(reason);
     }
+  }
+
+  const saveManager = {
+    requestSave(reason = "state-change") {
+      const now = Date.now();
+      console.count("SAVE_CALLED");
+      if (!saveTraceLogged) {
+        saveTraceLogged = true;
+        console.trace("SAVE_TRACE");
+      }
+      saveRequestTimestamps.push(now);
+      while (saveRequestTimestamps.length && (now - saveRequestTimestamps[0]) > 10_000) {
+        saveRequestTimestamps.shift();
+      }
+      logSaveEvent("request", {
+        reason,
+        callsLast10s: saveRequestTimestamps.length
+      });
+      requestSaveInternal(reason);
+    },
+    async flushNow(reason = "manual-click") {
+      if (localAuthMode) {
+        saveLocalState();
+        setSaveStatus("saved", "local");
+        return;
+      }
+      preparePendingSavePayload(reason);
+      await flushCloudSave(true, reason);
+    }
+  };
+
+  function saveState(reason = "state-change") {
+    saveManager.requestSave(reason);
   }
 
   async function loadUserGameState(uid) {
@@ -4250,13 +4285,7 @@
     dom.trackingSearchBtn.onclick = trackOrderByTrackingId;
 
     dom.saveNowBtn.onclick = async () => {
-      if (localAuthMode) {
-        saveLocalState();
-        setSaveStatus("saved", "local");
-      } else {
-        preparePendingSavePayload("manual-click");
-        await flushCloudSave(true, "manual-click");
-      }
+      await saveManager.flushNow("manual-click");
       toast("Save requested.");
     };
 
