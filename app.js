@@ -727,17 +727,13 @@
   async function restSaveUserDocument(uid, gameState) {
     if (isHostedContext()) {
       if (firebaseReady && auth?.currentUser) {
-        try {
-          return await postJson("/api/progress/save", {
-            uid,
-            username: usernameFromUser(auth.currentUser),
-            email: auth.currentUser?.email || "",
-            balance: Number(gameState.bankBalance || 0),
-            gameState
-          }, await getAuthApiHeaders());
-        } catch (err) {
-          // Skip the username/password proxy when the authenticated save path exists.
-        }
+        return postJson("/api/progress/save", {
+          uid,
+          username: usernameFromUser(auth.currentUser),
+          email: auth.currentUser?.email || "",
+          balance: Number(gameState.bankBalance || 0),
+          gameState
+        }, await getAuthApiHeaders());
       } else if (hasServerSession()) {
         try {
           return await postJson("/api/progress/save", {
@@ -1017,9 +1013,6 @@
     }
     preparePendingSavePayload(reason);
     scheduleAutosave(reason);
-    if (hasServerSession() && firebaseReady && currentUid && auth?.currentUser) {
-      scheduleServerMirrorSave(reason);
-    }
   }
 
   const saveManager = {
