@@ -1057,6 +1057,22 @@
     scheduleAutosave(reason);
   }
 
+  function queueBackgroundSave(reason = "background") {
+    saveLocalState();
+    if (localAuthMode) {
+      setSaveStatus("saved", "local");
+      return;
+    }
+    if (cloudHydrationInFlight) {
+      return;
+    }
+    preparePendingSavePayload(reason);
+    logSaveEvent("background-dirty", {
+      reason,
+      payloadSize: estimatePayloadSize(pendingCloudSnapshot)
+    });
+  }
+
   const saveManager = {
     requestSave(reason = "state-change") {
       const now = Date.now();
@@ -4222,7 +4238,7 @@
       shouldSave = true;
     }
     if (shouldSave) {
-      saveState("tick1s");
+      queueBackgroundSave("tick1s");
     }
     render();
   }
@@ -4249,7 +4265,7 @@
       }
     }
     if (shouldSave) {
-      saveState("tick30s");
+      queueBackgroundSave("tick30s");
     }
     render();
   }
