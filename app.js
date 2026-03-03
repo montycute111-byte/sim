@@ -2,6 +2,7 @@
   const STORAGE_KEY = "fakebank_state_v1";
   const LOCAL_USER_KEY = "fakebank_local_user";
   const LOCAL_ACCOUNTS_KEY = "fakebank_local_accounts_v1";
+  const PENDING_CLOUD_SAVE_KEY = "fakebank_pending_cloud_save_v1";
   const REQUIRED_FIREBASE_KEYS = ["apiKey", "authDomain", "projectId", "appId"];
 
   const SCHEMA_VERSION = 2;
@@ -335,15 +336,23 @@
   let tick30sHandle = null;
   let tick12sHandle = null;
   let saveTimer = null;
+  let saveStatusTimer = null;
   let saveInFlight = false;
   let cloudDirty = false;
+  let saveScheduledAt = 0;
+  let pendingSaveReason = "";
+  let pendingCloudSnapshot = null;
+  let lastSaveAttemptAt = 0;
+  let backoffAttemptCount = 0;
+  let cloudHydrationInFlight = false;
   let authActionInFlight = false;
   const CLOUD_SAVE_TIMEOUT_MS = 8000;
-  const CLOUD_SAVE_DEBOUNCE_MS = 15000;
-  const CLOUD_SAVE_MIN_INTERVAL_MS = 15000;
-  const CLOUD_SAVE_BACKOFF_MS = 60000;
+  const CLOUD_SAVE_DEBOUNCE_MS = 1200;
+  const CLOUD_SAVE_MIN_INTERVAL_MS = 8000;
+  const CLOUD_SAVE_MAX_BACKOFF_MS = 60000;
   let lastCloudSaveAt = 0;
   let nextCloudSaveAllowedAt = 0;
+  let saveStatusState = { status: "saved", detail: "local", at: 0 };
 
   let purchaseLock = false;
   let serverSession = { username: "", password: "" };
@@ -443,13 +452,108 @@
     toast._t = setTimeout(() => dom.toast.classList.add("hidden"), 2400);
   }
 
-  function setSaveStatus(status, detail = "") {
+  function getPendingCloudStorageKey() {
+    const localUser = localStorage.getItem(LOCAL_USER_KEY);
+    const accountKey = localUser ? String(localUser).trim().toLowerCase() : "default";
+    return `${PENDING_CLOUD_SAVE_KEY}__${accountKey}`;
+  }
+
+  function persistPendingCloudState(payload) {
+    try {
+      if (!payload) {
+        localStorage.removeItem(getPendingCloudStorageKey());
+        return;
+      }
+      localStorage.setItem(getPendingCloudStorageKey(), JSON.stringify({
+        savedAt: Date.now(),
+        payload
+      }));
+    } catch {
+      // Ignore localStorage quota errors; in-memory state is still authoritative.
+    }
+  }
+
+  function estimatePayloadSize(payload) {
+    try {
+      return JSON.stringify(payload).length;
+    } catch {
+      return 0;
+    }
+  }
+
+  function logSaveEvent(event, meta = {}) {
+    console.info("[save-pipeline]", event, meta);
+  }
+
+  function finalizeSuccessfulSave(payload) {
+    lastCloudSaveAt = Date.now();
+    nextCloudSaveAllowedAt = 0;
+    backoffAttemptCount = 0;
+    if (pendingCloudSnapshot === payload) {
+      cloudDirty = false;
+      pendingCloudSnapshot = null;
+      persistPendingCloudState(null);
+    } else {
+      cloudDirty = true;
+      persistPendingCloudState(pendingCloudSnapshot);
+    }
+    saveLocalState();
+  }
+
+  function isRateLimitError(err) {
+    const detail = String(err?.code || err?.message || err?.status || "").toLowerCase();
+    return (
+      err?.status === 429 ||
+      detail.includes("429") ||
+      detail.includes("resource_exhausted") ||
+      detail.includes("rate-limit") ||
+      detail.includes("quota")
+    );
+  }
+
+  function computeBackoffDelayMs() {
+    const base = Math.min(CLOUD_SAVE_MAX_BACKOFF_MS, 1000 * Math.pow(2, backoffAttemptCount));
+    const jitter = Math.floor(Math.random() * Math.max(250, Math.floor(base * 0.25)));
+    return Math.min(CLOUD_SAVE_MAX_BACKOFF_MS, base + jitter);
+  }
+
+  function renderSaveStatus() {
     if (!dom.saveStatus) return;
-    const suffix = detail ? ` (${detail})` : "";
-    if (status === "saved") dom.saveStatus.textContent = `Save status: Saved${suffix}`;
-    else if (status === "saving") dom.saveStatus.textContent = `Save status: Saving...${suffix}`;
-    else if (status === "offline") dom.saveStatus.textContent = `Save status: Offline / pending${suffix}`;
-    else dom.saveStatus.textContent = `Save status: Save failed${suffix}`;
+    const now = Date.now();
+    const stateStatus = saveStatusState.status;
+    const detail = saveStatusState.detail || "";
+    let text = "Save status: Saved";
+
+    if (stateStatus === "saved") {
+      const at = saveStatusState.at ? new Date(saveStatusState.at).toLocaleTimeString() : "";
+      const suffix = detail ? ` (${detail})` : "";
+      text = at ? `Save status: Saved at ${at}${suffix}` : `Save status: Saved${suffix}`;
+    } else if (stateStatus === "saving") {
+      text = detail ? `Save status: Saving... (${detail})` : "Save status: Saving...";
+    } else if (stateStatus === "offline") {
+      if (nextCloudSaveAllowedAt && now < nextCloudSaveAllowedAt) {
+        text = `Save status: Rate-limited; retry in ${fmtDur(nextCloudSaveAllowedAt - now)}`;
+      } else if (!navigator.onLine) {
+        text = "Save status: Offline";
+      } else {
+        text = detail ? `Save status: Offline / pending (${detail})` : "Save status: Offline / pending";
+      }
+    } else {
+      text = detail ? `Save status: Save failed (${detail})` : "Save status: Save failed";
+    }
+
+    dom.saveStatus.textContent = text;
+
+    clearTimeout(saveStatusTimer);
+    saveStatusTimer = null;
+    if (nextCloudSaveAllowedAt && now < nextCloudSaveAllowedAt) {
+      saveStatusTimer = setTimeout(renderSaveStatus, 1000);
+    }
+  }
+
+  function setSaveStatus(status, detail = "") {
+    saveStatusState = { status, detail, at: Date.now() };
+    renderSaveStatus();
   }
 
   function setAuthBusy(isBusy) {
@@ -890,10 +994,30 @@
     await handleAuthState({ uid: `local_${key}`, email: `${key}@local.test` });
   }
 
-  function saveState() {
+  function preparePendingSavePayload(reason = "autosave") {
+    cloudDirty = true;
+    pendingSaveReason = reason;
+    pendingCloudSnapshot = exportGameStateForSave();
     saveLocalState();
-    scheduleAutosave();
-    if (!hasServerSession()) scheduleServerMirrorSave();
+    persistPendingCloudState(pendingCloudSnapshot);
+    return pendingCloudSnapshot;
+  }
+
+  function saveState(reason = "state-change") {
+    saveLocalState();
+    if (localAuthMode) {
+      setSaveStatus("saved", "local");
+      return;
+    }
+    if (cloudHydrationInFlight) {
+      logSaveEvent("skip-during-hydration", { reason });
+      return;
+    }
+    preparePendingSavePayload(reason);
+    scheduleAutosave(reason);
+    if (hasServerSession() && firebaseReady && currentUid && auth?.currentUser) {
+      scheduleServerMirrorSave(reason);
+    }
   }
 
   async function loadUserGameState(uid) {
@@ -980,80 +1104,107 @@
     }, { merge: true });
   }
 
-  async function flushCloudSave(force = false) {
+  async function flushCloudSave(force = false, reason = "autosave") {
     if (localAuthMode) {
       saveLocalState();
       setSaveStatus("saved", "local");
       return;
     }
 
-    const now = Date.now();
-    if (nextCloudSaveAllowedAt && now < nextCloudSaveAllowedAt) {
-      saveLocalState();
-      setSaveStatus("offline", `rate-limited; retry in ${fmtDur(nextCloudSaveAllowedAt - now)}`);
-      if (cloudDirty) scheduleAutosave();
+    if (cloudHydrationInFlight) {
+      logSaveEvent("defer-during-hydration", { reason, force });
       return;
     }
 
+    if (saveInFlight) {
+      logSaveEvent("save-already-in-flight", { reason, force, dirty: cloudDirty });
+      return;
+    }
+
+    const now = Date.now();
+    if (nextCloudSaveAllowedAt && now < nextCloudSaveAllowedAt) {
+      if (cloudDirty) scheduleAutosave(reason);
+      setSaveStatus("offline", "backoff");
+      return;
+    }
+
+    if (!navigator.onLine) {
+      setSaveStatus("offline", "offline");
+      logSaveEvent("skip-offline", { reason, force, dirty: cloudDirty });
+      return;
+    }
+
+    if (!cloudDirty && !force) {
+      return;
+    }
+
+    const payload = pendingCloudSnapshot || exportGameStateForSave();
+    const payloadSize = estimatePayloadSize(payload);
+    const sinceLastAttempt = lastSaveAttemptAt ? now - lastSaveAttemptAt : null;
+    lastSaveAttemptAt = now;
+    saveInFlight = true;
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    saveScheduledAt = 0;
+    setSaveStatus("saving", reason);
+    logSaveEvent("attempt", {
+      reason,
+      force,
+      payloadSize,
+      sinceLastAttempt
+    });
+
     if (hasServerSession() && !(firebaseReady && currentUid && auth?.currentUser)) {
-      if (!force && lastCloudSaveAt && (now - lastCloudSaveAt) < CLOUD_SAVE_MIN_INTERVAL_MS) {
-        if (cloudDirty) scheduleAutosave();
-        return;
-      }
-      setSaveStatus("saving");
       try {
         await withTimeout(
           postJson("/api/progress/save", {
             username: serverSession.username,
             password: serverSession.password,
-            progress: exportGameStateForSave()
+            progress: payload
           }),
           5000,
           "server-save-timeout"
         );
-        cloudDirty = false;
-        lastCloudSaveAt = Date.now();
-        nextCloudSaveAllowedAt = 0;
         serverReachable = true;
-        saveLocalState();
+        finalizeSuccessfulSave(payload);
         setSaveStatus("saved", "server");
+        logSaveEvent("success", { reason, target: "server" });
         return;
       } catch (err) {
         cloudDirty = true;
         serverReachable = false;
         const detail = err?.code || err?.message || "server-save-failed";
-        if (String(detail).includes("RESOURCE_EXHAUSTED")) {
-          nextCloudSaveAllowedAt = Date.now() + CLOUD_SAVE_BACKOFF_MS;
-          saveLocalState();
-          setSaveStatus("offline", `rate-limited; retry in ${fmtDur(CLOUD_SAVE_BACKOFF_MS)}`);
-          scheduleAutosave();
+        if (isRateLimitError(err)) {
+          backoffAttemptCount += 1;
+          nextCloudSaveAllowedAt = Date.now() + computeBackoffDelayMs();
+          setSaveStatus("offline", "backoff");
+          logSaveEvent("rate-limited", { reason, detail, retryInMs: nextCloudSaveAllowedAt - Date.now() });
           return;
         }
         setSaveStatus(
           navigator.onLine ? "error" : "offline",
           detail
         );
+        logSaveEvent("error", { reason, detail, status: err?.status || null });
         return;
+      } finally {
+        saveInFlight = false;
+        if (cloudDirty) scheduleAutosave(reason);
       }
     }
 
     if (firebaseReady && currentUid && auth?.currentUser) {
-      if (!force && lastCloudSaveAt && (now - lastCloudSaveAt) < CLOUD_SAVE_MIN_INTERVAL_MS) {
-        if (cloudDirty) scheduleAutosave();
-        return;
-      }
-      setSaveStatus("saving");
       try {
         await withTimeout(
-          restSaveUserDocument(currentUid, exportGameStateForSave()),
+          restSaveUserDocument(currentUid, payload),
           5000,
           "rest-save-timeout"
         );
-        cloudDirty = false;
-        lastCloudSaveAt = Date.now();
-        nextCloudSaveAllowedAt = 0;
-        saveLocalState();
+        finalizeSuccessfulSave(payload);
         setSaveStatus("saved", "cloud");
+        logSaveEvent("success", { reason, target: "rest" });
+        saveInFlight = false;
+        if (cloudDirty) scheduleAutosave("post-flight-dirty");
         return;
       } catch (err) {
         // On hosted deployments, the same-origin proxy already attempted the save path
@@ -1061,102 +1212,142 @@
         if (isHostedContext()) {
           cloudDirty = true;
           const detail = err?.code || err?.message || "cloud-save-failed";
-          if (String(detail).includes("RESOURCE_EXHAUSTED")) {
-            nextCloudSaveAllowedAt = Date.now() + CLOUD_SAVE_BACKOFF_MS;
-            saveLocalState();
-            setSaveStatus("offline", `rate-limited; retry in ${fmtDur(CLOUD_SAVE_BACKOFF_MS)}`);
-            scheduleAutosave();
+          if (isRateLimitError(err)) {
+            backoffAttemptCount += 1;
+            nextCloudSaveAllowedAt = Date.now() + computeBackoffDelayMs();
+            setSaveStatus("offline", "backoff");
+            logSaveEvent("rate-limited", { reason, detail, retryInMs: nextCloudSaveAllowedAt - Date.now() });
+            saveInFlight = false;
+            if (cloudDirty) scheduleAutosave(reason);
             return;
           }
           setSaveStatus(
             navigator.onLine ? "error" : "offline",
             detail
           );
+          logSaveEvent("error", { reason, detail, status: err?.status || null });
+          saveInFlight = false;
           return;
         }
         // Fall through to SDK save only in local/test contexts.
         if (!firebaseReady) {
           cloudDirty = true;
           setSaveStatus("error", err?.code || err?.message || "rest-save-failed");
+          logSaveEvent("error", {
+            reason,
+            detail: err?.code || err?.message || "rest-save-failed",
+            status: err?.status || null
+          });
+          saveInFlight = false;
           return;
         }
       }
     }
 
-    if (!firebaseReady || !currentUid || !cloudDirty || saveInFlight) return;
-    saveInFlight = true;
-    cloudDirty = false;
-    setSaveStatus("saving");
+    if (!firebaseReady || !currentUid) {
+      saveInFlight = false;
+      return;
+    }
+
     try {
       await withTimeout(
-        saveUserGameState(currentUid, exportGameStateForSave()),
+        saveUserGameState(currentUid, payload),
         CLOUD_SAVE_TIMEOUT_MS,
         "cloud-save-timeout"
       );
-      lastCloudSaveAt = Date.now();
-      nextCloudSaveAllowedAt = 0;
-      setSaveStatus("saved");
+      finalizeSuccessfulSave(payload);
+      setSaveStatus("saved", "cloud");
+      logSaveEvent("success", { reason, target: "sdk" });
     } catch (err) {
       cloudDirty = true;
       const detail = err?.code || err?.message || "unknown";
-      if (String(detail).includes("RESOURCE_EXHAUSTED")) {
-        nextCloudSaveAllowedAt = Date.now() + CLOUD_SAVE_BACKOFF_MS;
-        saveLocalState();
-        setSaveStatus("offline", `rate-limited; retry in ${fmtDur(CLOUD_SAVE_BACKOFF_MS)}`);
+      if (isRateLimitError(err)) {
+        backoffAttemptCount += 1;
+        nextCloudSaveAllowedAt = Date.now() + computeBackoffDelayMs();
+        setSaveStatus("offline", "backoff");
+        logSaveEvent("rate-limited", { reason, detail, retryInMs: nextCloudSaveAllowedAt - Date.now() });
         return;
       }
       setSaveStatus(
         navigator.onLine ? "error" : "offline",
         detail
       );
+      logSaveEvent("error", { reason, detail, status: err?.status || null });
     } finally {
       saveInFlight = false;
-      if (cloudDirty) scheduleAutosave();
+      if (cloudDirty) scheduleAutosave(reason);
     }
   }
 
-  function scheduleAutosave() {
+  function scheduleAutosave(reason = "autosave") {
     if (localAuthMode) {
       saveLocalState();
       setSaveStatus("saved", "local");
       return;
     }
-    if ((!firebaseReady || !currentUid) && !hasServerSession()) {
-      if (localAuthMode) setSaveStatus("saved", "local");
+    if (cloudHydrationInFlight) {
       return;
     }
-    cloudDirty = true;
-    clearTimeout(saveTimer);
+    if ((!firebaseReady || !currentUid) && !hasServerSession()) {
+      return;
+    }
+    if (!navigator.onLine) {
+      setSaveStatus("offline", "offline");
+      return;
+    }
+    if (!cloudDirty) {
+      preparePendingSavePayload(reason);
+    }
+    if (saveInFlight) {
+      return;
+    }
     const now = Date.now();
     const nextAt = Math.max(
       now + CLOUD_SAVE_DEBOUNCE_MS,
       lastCloudSaveAt ? lastCloudSaveAt + CLOUD_SAVE_MIN_INTERVAL_MS : 0,
       nextCloudSaveAllowedAt || 0
     );
+    if (saveTimer && saveScheduledAt && saveScheduledAt <= nextAt) {
+      logSaveEvent("coalesced", { reason, scheduledInMs: saveScheduledAt - now });
+      return;
+    }
+    clearTimeout(saveTimer);
+    saveScheduledAt = nextAt;
+    logSaveEvent("scheduled", { reason, scheduledInMs: nextAt - now });
     saveTimer = setTimeout(() => {
-      flushCloudSave();
+      saveTimer = null;
+      saveScheduledAt = 0;
+      flushCloudSave(false, pendingSaveReason || reason);
     }, Math.max(0, nextAt - now));
   }
 
-  async function flushServerMirrorSave() {
+  async function flushServerMirrorSave(reason = "server-mirror") {
     if (!hasServerSession()) return;
     try {
+      const payload = pendingCloudSnapshot || exportGameStateForSave();
+      logSaveEvent("mirror-attempt", {
+        reason,
+        payloadSize: estimatePayloadSize(payload),
+        sinceLastAttempt: lastSaveAttemptAt ? Date.now() - lastSaveAttemptAt : null
+      });
       await postJson("/api/progress/save", {
         username: serverSession.username,
         password: serverSession.password,
-        progress: exportGameStateForSave()
+        progress: payload
       });
       serverReachable = true;
+      logSaveEvent("mirror-success", { reason });
     } catch {
       serverReachable = false;
+      logSaveEvent("mirror-error", { reason });
     }
   }
 
-  function scheduleServerMirrorSave() {
+  function scheduleServerMirrorSave(reason = "server-mirror") {
     if (!hasServerSession()) return;
     clearTimeout(serverMirrorSaveTimer);
     serverMirrorSaveTimer = setTimeout(() => {
-      flushServerMirrorSave();
+      flushServerMirrorSave(reason);
     }, 700);
   }
 
@@ -1167,7 +1358,7 @@
       return;
     }
     if (cloudDirty && !saveInFlight && (hasServerSession() || (firebaseReady && currentUid))) {
-      flushCloudSave();
+      flushCloudSave(true, "flush-pending");
     }
   }
 
@@ -1410,15 +1601,29 @@
       clearSocialListeners();
       resetSocialState();
       currentUid = null;
+      cloudHydrationInFlight = false;
+      cloudDirty = false;
+      pendingCloudSnapshot = null;
+      pendingSaveReason = "";
+      clearTimeout(saveTimer);
+      saveTimer = null;
+      saveScheduledAt = 0;
       showAuthScreen();
       dom.whoami.textContent = "";
       return;
     }
     currentUid = user.uid;
+    cloudDirty = false;
+    pendingCloudSnapshot = null;
+    pendingSaveReason = "";
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    saveScheduledAt = 0;
     if (localAuthMode) {
       replaceState(loadLocalState());
       balanceDisplay = state.bankBalance;
     } else {
+      cloudHydrationInFlight = true;
       replaceState(loadLocalState());
       balanceDisplay = state.bankBalance;
       setSaveStatus("offline", "loading-cloud");
@@ -1444,6 +1649,9 @@
       loadUserGameState(user.uid).catch((err) => {
         console.warn("Cloud state load skipped:", err?.code || err?.message || err);
         setSaveStatus(navigator.onLine ? "offline" : "offline", err?.code || err?.message || "cloud-load-failed");
+      }).finally(() => {
+        cloudHydrationInFlight = false;
+        if (cloudDirty) scheduleAutosave("post-hydration");
       });
     }
 
@@ -3924,6 +4132,11 @@
   }
 
   function tick1s() {
+    renderSaveStatus();
+    if (cloudHydrationInFlight) {
+      render();
+      return;
+    }
     const now = Date.now();
     let shouldSave = false;
     if (state.streakWindowUntil && now > state.streakWindowUntil) {
@@ -3938,12 +4151,17 @@
       shouldSave = true;
     }
     if (shouldSave) {
-      saveState();
+      saveState("tick1s");
     }
     render();
   }
 
   function tick30s() {
+    if (cloudHydrationInFlight) {
+      renderSaveStatus();
+      render();
+      return;
+    }
     let shouldSave = false;
     if (opportunityCheck()) {
       shouldSave = true;
@@ -3960,7 +4178,7 @@
       }
     }
     if (shouldSave) {
-      saveState();
+      saveState("tick30s");
     }
     render();
   }
@@ -4032,8 +4250,13 @@
     dom.trackingSearchBtn.onclick = trackOrderByTrackingId;
 
     dom.saveNowBtn.onclick = async () => {
-      saveState();
-      if (!localAuthMode) await flushCloudSave(true);
+      if (localAuthMode) {
+        saveLocalState();
+        setSaveStatus("saved", "local");
+      } else {
+        preparePendingSavePayload("manual-click");
+        await flushCloudSave(true, "manual-click");
+      }
       toast("Save requested.");
     };
 
@@ -4105,11 +4328,17 @@
     if (!firebaseReady) return;
 
     firebaseApi.onAuthStateChanged(auth, handleAuthState);
-    window.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "hidden") flushCloudSave();
+    window.addEventListener("online", () => {
+      if (cloudDirty) {
+        nextCloudSaveAllowedAt = 0;
+        setSaveStatus("offline", "reconnected");
+        scheduleAutosave("back-online");
+      } else {
+        setSaveStatus("saved", "online");
+      }
     });
-    window.addEventListener("beforeunload", () => {
-      flushCloudSave();
+    window.addEventListener("offline", () => {
+      setSaveStatus("offline", "offline");
     });
   }
 
