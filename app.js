@@ -576,6 +576,19 @@
 
   async function restLoadUserDocument(uid) {
     if (isHostedContext()) {
+      if (firebaseReady && auth?.currentUser) {
+        try {
+          const data = await postJson("/api/progress/load", { uid }, await getAuthApiHeaders());
+          if (data && Object.prototype.hasOwnProperty.call(data, "document")) {
+            return data.document || null;
+          }
+        } catch (err) {
+          if (err?.status && err.status !== 404) {
+            // Fall through to the username/password proxy path.
+          }
+        }
+      }
+
       if (hasServerSession()) {
         try {
           const data = await postJson("/api/progress/load", {
@@ -587,19 +600,8 @@
           }
         } catch (err) {
           if (err?.status && err.status !== 404) {
-            // Fall through to the auth-header proxy path.
+            // Fall back to direct Firestore REST only when the same-origin proxy fails.
           }
-        }
-      }
-
-      try {
-        const data = await postJson("/api/progress/load", { uid }, await getAuthApiHeaders());
-        if (data && Object.prototype.hasOwnProperty.call(data, "document")) {
-          return data.document || null;
-        }
-      } catch (err) {
-        if (err?.status && err.status !== 404) {
-          // Fall back to direct Firestore REST only when the same-origin proxy fails.
         }
       }
     }
@@ -621,6 +623,20 @@
 
   async function restSaveUserDocument(uid, gameState) {
     if (isHostedContext()) {
+      if (firebaseReady && auth?.currentUser) {
+        try {
+          return await postJson("/api/progress/save", {
+            uid,
+            username: usernameFromUser(auth.currentUser),
+            email: auth.currentUser?.email || "",
+            balance: Number(gameState.bankBalance || 0),
+            gameState
+          }, await getAuthApiHeaders());
+        } catch (err) {
+          // Fall through to the username/password proxy path.
+        }
+      }
+
       if (hasServerSession()) {
         try {
           return await postJson("/api/progress/save", {
@@ -629,20 +645,8 @@
             progress: gameState
           });
         } catch (err) {
-          // Fall through to the auth-header proxy path.
+          // Fall back to direct Firestore REST only when the same-origin proxy fails.
         }
-      }
-
-      try {
-        return await postJson("/api/progress/save", {
-          uid,
-          username: usernameFromUser(auth.currentUser),
-          email: auth.currentUser?.email || "",
-          balance: Number(gameState.bankBalance || 0),
-          gameState
-        }, await getAuthApiHeaders());
-      } catch (err) {
-        // Fall back to direct Firestore REST only when the same-origin proxy fails.
       }
     }
 
@@ -996,7 +1000,7 @@
       return;
     }
 
-    if (hasServerSession()) {
+    if (hasServerSession() && !(firebaseReady && currentUid && auth?.currentUser)) {
       if (!force && lastCloudSaveAt && (now - lastCloudSaveAt) < CLOUD_SAVE_MIN_INTERVAL_MS) {
         if (cloudDirty) scheduleAutosave();
         return;
