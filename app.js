@@ -1,4 +1,4 @@
-(() => {
+\(() => {
   const STORAGE_KEY = "fakebank_state_v1";
   const LOCAL_USER_KEY = "fakebank_local_user";
   const LOCAL_ACCOUNTS_KEY = "fakebank_local_accounts_v1";
@@ -2012,13 +2012,16 @@
   }
 
   function removeExpiredBoosts(now = Date.now()) {
+    let changed = false;
     for (const [boostId, boost] of Object.entries(state.activeBoosts)) {
       const doneByTime = stampMs(boost.endsAt) && now >= stampMs(boost.endsAt);
       const doneByUses = boost.type === "payoutBonusNextN" && (boost.remainingUses || 0) <= 0;
       if (doneByTime || doneByUses) {
         delete state.activeBoosts[boostId];
+        changed = true;
       }
     }
+    return changed;
   }
 
   function getActiveBoostEffects(now = Date.now()) {
@@ -2327,17 +2330,21 @@
 
   function opportunityCheck() {
     const now = Date.now();
+    let changed = false;
 
     if (state.activeOpportunity && now >= state.activeOpportunity.offerExpiresAt) {
       state.activeOpportunity = null;
+      changed = true;
     }
 
     if (!state.nextOpportunityCheckAt) {
       state.nextOpportunityCheckAt = now + randInt(5 * 60 * 1000, 10 * 60 * 1000);
+      changed = true;
     }
 
     if (!state.activeOpportunity && now >= state.nextOpportunityCheckAt) {
       state.nextOpportunityCheckAt = now + randInt(5 * 60 * 1000, 10 * 60 * 1000);
+      changed = true;
       if (Math.random() < 0.20) {
         state.activeOpportunity = {
           id: uniqueId("opp"),
@@ -2346,8 +2353,10 @@
           basePay: 80,
           offerExpiresAt: now + 30 * 1000
         };
+        changed = true;
       }
     }
+    return changed;
   }
 
   function acceptOpportunity() {
@@ -2693,6 +2702,7 @@
   }
 
   function updateOrderStatuses(now = Date.now()) {
+    let changed = false;
     for (const order of Object.values(state.orders)) {
       const next = deriveOrderStatus(order, now);
       if (order.status !== next) {
@@ -2700,8 +2710,10 @@
         order.timeline.push({ status: next, at: now });
         order.status = next;
         order.lastStatusUpdateAt = now;
+        changed = true;
       }
     }
+    return changed;
   }
 
   async function refreshRotatingShop(force = false) {
@@ -3542,7 +3554,6 @@
   }
 
   function renderOrders(now) {
-    updateOrderStatuses(now);
     const orders = hasServerSession() && serverOrders.length
       ? [...serverOrders].sort((a, b) => b.createdAt - a.createdAt)
       : Object.values(state.orders).sort((a, b) => b.createdAt - a.createdAt);
@@ -3692,6 +3703,9 @@
       state.streakWindowUntil = null;
       shouldSave = true;
     }
+    if (updateOrderStatuses(now)) {
+      shouldSave = true;
+    }
     if (processPassiveIncome()) {
       shouldSave = true;
     }
@@ -3702,17 +3716,24 @@
   }
 
   function tick30s() {
-    opportunityCheck();
+    let shouldSave = false;
+    if (opportunityCheck()) {
+      shouldSave = true;
+    }
     if (hasServerSession()) refreshServerOrders();
     const now = Date.now();
     if (now - lastBoostCleanupAt >= 5 * 60 * 1000) {
       lastBoostCleanupAt = now;
-      removeExpiredBoosts(now);
+      if (removeExpiredBoosts(now)) {
+        shouldSave = true;
+      }
       if (firebaseReady && currentUid) {
         cleanupExpiredCloudBoosts(now).catch(() => {});
       }
     }
-    saveState();
+    if (shouldSave) {
+      saveState();
+    }
     render();
   }
 
