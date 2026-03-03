@@ -354,6 +354,7 @@
   const BACKGROUND_SAVE_DEBOUNCE_MS = 5000;
   const BACKGROUND_SAVE_MIN_INTERVAL_MS = 60000;
   const CLOUD_SAVE_MAX_BACKOFF_MS = 60000;
+  const MAX_AUTOMATIC_RATE_RETRIES = 3;
   let lastCloudSaveAt = 0;
   let nextCloudSaveAllowedAt = 0;
   let saveStatusState = { status: "saved", detail: "local", at: 0 };
@@ -537,6 +538,29 @@
       debounceMs: CLOUD_SAVE_DEBOUNCE_MS,
       minIntervalMs: CLOUD_SAVE_MIN_INTERVAL_MS
     };
+  }
+
+  function registerRateLimit(reason, detail) {
+    backoffAttemptCount += 1;
+    if (backoffAttemptCount > MAX_AUTOMATIC_RATE_RETRIES) {
+      nextCloudSaveAllowedAt = 0;
+      setSaveStatus("error", "rate-limited; waiting for next change");
+      logSaveEvent("rate-limit-paused", {
+        reason,
+        detail,
+        attempts: backoffAttemptCount
+      });
+      return false;
+    }
+    nextCloudSaveAllowedAt = Date.now() + computeBackoffDelayMs();
+    setSaveStatus("offline", "backoff");
+    logSaveEvent("rate-limited", {
+      reason,
+      detail,
+      retryInMs: nextCloudSaveAllowedAt - Date.now(),
+      attempts: backoffAttemptCount
+    });
+    return true;
   }
 
   function renderSaveStatus() {
@@ -956,8 +980,263 @@
     Object.assign(state, fresh);
   }
 
+  function finiteOrNull(value) {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : null;
+  }
+
+  function shallowClone(value) {
+    if (value === null || value === undefined) return value;
+    try {
+      return JSON.parse(JSON.stringify(value));
+    } catch {
+      return null;
+    }
+  }
+
+  function exportTxLogForSave(limit = 12) {
+    return (Array.isArray(state.txLog) ? state.txLog : [])
+      .slice(0, limit)
+      .map((entry) => ({
+        ts: finiteOrNull(entry?.ts) || Date.now(),
+        type: String(entry?.type || "event"),
+        amount: Number.isFinite(Number(entry?.amount)) ? Number(entry.amount) : 0,
+        meta: shallowClone(entry?.meta) || {}
+      }));
+  }
+
+  function exportActiveJobsForSave(limit = 6) {
+    return (Array.isArray(state.activeJobs) ? state.activeJobs : [])
+      .slice(0, limit)
+      .map((job) => ({
+        runId: String(job?.runId || uniqueId("job")),
+        jobId: String(job?.jobId || ""),
+        name: String(job?.name || job?.jobId || "Job"),
+        durationMin: Math.max(0, Number(job?.durationMin || 0)),
+        basePay: Math.max(0, Number(job?.basePay || 0)),
+        riskType: job?.riskType ? String(job.riskType) : null,
+        category: String(job?.category || "general"),
+        acceptedAt: finiteOrNull(job?.acceptedAt) || Date.now(),
+        finishAt: finiteOrNull(job?.finishAt) || Date.now()
+      }));
+  }
+
+  function exportInventoryForSave(limit = 250) {
+    const out = {};
+    const entries = Object.entries(state.inventory || {}).slice(0, limit);
+    entries.forEach(([itemId, itemState]) => {
+      const qty = Math.max(0, Math.floor(Number(itemState?.qty || 0)));
+      if (!qty) return;
+      out[itemId] = { qty };
+    });
+    return out;
+  }
+
+  function exportOrderTimeline(order, limit = 4) {
+    return (Array.isArray(order?.timeline) ? order.timeline : [])
+      .slice(-limit)
+      .map((event) => ({
+        status: String(event?.status || "Processing"),
+        at: finiteOrNull(event?.at) || Date.now()
+      }));
+  }
+
+  function exportOrderItems(order, limit = 5) {
+    return (Array.isArray(order?.items) ? order.items : [])
+      .slice(0, limit)
+      .map((line) => ({
+        itemId: String(line?.itemId || ""),
+        name: String(line?.name || line?.itemId || "Item"),
+        qty: Math.max(1, Math.floor(Number(line?.qty || 1))),
+        price: Math.max(0, Number(line?.price || 0))
+      }));
+  }
+
+  function exportOrdersForSave(limit = 8, includeTimeline = true) {
+    const out = {};
+    const entries = Object.entries(state.orders || {})
+      .sort(([, a], [, b]) => (Number(b?.createdAt || 0) - Number(a?.createdAt || 0)))
+      .slice(0, limit);
+
+    entries.forEach(([orderId, order]) => {
+      if (!order || typeof order !== "object") return;
+      out[orderId] = {
+        orderId: String(order?.orderId || order?.id || orderId),
+        trackingId: String(order?.trackingId || ""),
+        carrier: String(order?.carrier || "MegaShip"),
+        status: String(order?.status || "Processing"),
+        createdAt: finiteOrNull(order?.createdAt) || Date.now(),
+        shippedAt: finiteOrNull(order?.shippedAt),
+        outForDeliveryAt: finiteOrNull(order?.outForDeliveryAt),
+        etaAt: finiteOrNull(order?.etaAt ?? order?.estimatedDeliveryAt ?? order?.deliveredAt),
+        estimatedDeliveryAt: finiteOrNull(order?.estimatedDeliveryAt ?? order?.etaAt ?? order?.deliveredAt),
+        deliveredAt: finiteOrNull(order?.deliveredAt),
+        lastStatusUpdateAt: finiteOrNull(order?.lastStatusUpdateAt) || Date.now(),
+        subtotal: Math.max(0, Number(order?.subtotal || 0)),
+        shippingFee: Math.max(0, Number(order?.shippingFee || 0)),
+        total: Math.max(0, Number(order?.total || 0)),
+        items: exportOrderItems(order),
+        deliveredClaimedToInventory: Boolean(order?.deliveredClaimedToInventory)
+      };
+      if (includeTimeline) {
+        out[orderId].timeline = exportOrderTimeline(order);
+      }
+    });
+
+    return out;
+  }
+
+  function exportBoostMeta(meta) {
+    if (!meta || typeof meta !== "object") return {};
+    const out = {};
+    Object.entries(meta).slice(0, 8).forEach(([key, value]) => {
+      if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+        out[key] = value;
+        return;
+      }
+      if (Array.isArray(value)) {
+        out[key] = value.slice(0, 6).map((entry) => {
+          if (entry === null || ["string", "number", "boolean"].includes(typeof entry)) return entry;
+          return null;
+        });
+        return;
+      }
+      if (typeof value === "object") {
+        const nested = {};
+        Object.entries(value).slice(0, 6).forEach(([nestedKey, nestedValue]) => {
+          if (nestedValue === null || ["string", "number", "boolean"].includes(typeof nestedValue)) {
+            nested[nestedKey] = nestedValue;
+          }
+        });
+        out[key] = nested;
+      }
+    });
+    return out;
+  }
+
+  function exportActiveBoostsForSave(limit = 12) {
+    const out = {};
+    Object.entries(state.activeBoosts || {})
+      .slice(0, limit)
+      .forEach(([boostId, boost]) => {
+        if (!boost || typeof boost !== "object") return;
+        out[boostId] = {
+          id: String(boost?.id || boostId),
+          itemId: String(boost?.itemId || boost?.id || boostId),
+          name: String(boost?.name || boost?.itemId || boostId),
+          type: String(boost?.type || "custom"),
+          value: Number.isFinite(Number(boost?.value)) ? Number(boost.value) : 0,
+          startedAt: finiteOrNull(boost?.startedAt) || Date.now(),
+          endsAt: finiteOrNull(boost?.endsAt) || (Date.now() + POWER_DURATION_MS),
+          stacks: Math.max(1, Math.floor(Number(boost?.stacks || 1))),
+          meta: exportBoostMeta(boost?.meta)
+        };
+        if (boost?.remainingUses !== undefined) {
+          out[boostId].remainingUses = Math.max(0, Math.floor(Number(boost.remainingUses || 0)));
+        }
+      });
+    return out;
+  }
+
+  function exportOwnedBusinessesForSave(limit = 100) {
+    const out = {};
+    Object.entries(state.ownedBusinesses || {})
+      .slice(0, limit)
+      .forEach(([bizId, value]) => {
+        out[bizId] = {
+          level: Math.max(0, Math.floor(Number(value?.level || 0))),
+          lastPaidAt: finiteOrNull(value?.lastPaidAt) || Date.now(),
+          hasManager: Boolean(value?.hasManager),
+          needsRestart: Boolean(value?.needsRestart)
+        };
+      });
+    return out;
+  }
+
+  function buildCloudSaveState() {
+    const now = Date.now();
+    const nextState = {
+      schemaVersion: SCHEMA_VERSION,
+      bankBalance: Number(state.bankBalance || 0),
+      bankLevel: Math.max(1, Math.floor(Number(state.bankLevel || 1))),
+      bankXP: Math.max(0, Number(state.bankXP || 0)),
+      reputation: Number(state.reputation || 0),
+      txLog: exportTxLogForSave(12),
+
+      activeJobs: exportActiveJobsForSave(6),
+      jobCooldownUntil: finiteOrNull(state.jobCooldownUntil),
+      parallelJobUpgradeLevel: Math.max(0, Math.floor(Number(state.parallelJobUpgradeLevel || 0))),
+
+      quickTaskActiveId: state.quickTaskActiveId ? String(state.quickTaskActiveId) : null,
+      quickTaskAcceptedAt: finiteOrNull(state.quickTaskAcceptedAt),
+      quickTaskFinishAt: finiteOrNull(state.quickTaskFinishAt),
+      quickTasksUsedInWindow: Math.max(0, Math.floor(Number(state.quickTasksUsedInWindow || 0))),
+      quickTaskWindowResetAt: finiteOrNull(state.quickTaskWindowResetAt) || (now + QUICK_WINDOW_MS),
+
+      mainStreak: Math.max(0, Math.floor(Number(state.mainStreak || 0))),
+      streakWindowUntil: finiteOrNull(state.streakWindowUntil),
+      lastMainJobClaimAt: finiteOrNull(state.lastMainJobClaimAt),
+
+      activeOpportunity: state.activeOpportunity && typeof state.activeOpportunity === "object"
+        ? {
+            id: String(state.activeOpportunity.id || ""),
+            title: String(state.activeOpportunity.title || "Flash Contract"),
+            durationMin: Math.max(0, Number(state.activeOpportunity.durationMin || 0)),
+            basePay: Math.max(0, Number(state.activeOpportunity.basePay || 0)),
+            offerExpiresAt: finiteOrNull(state.activeOpportunity.offerExpiresAt) || now
+          }
+        : null,
+      nextOpportunityCheckAt: finiteOrNull(state.nextOpportunityCheckAt),
+
+      inventory: exportInventoryForSave(250),
+      orders: exportOrdersForSave(8, true),
+      activeBoosts: exportActiveBoostsForSave(12),
+
+      skillPoints: Math.max(0, Math.floor(Number(state.skillPoints || 0))),
+      trainingsBought: Math.max(0, Math.floor(Number(state.trainingsBought || 0))),
+      skills: {
+        efficiency: Math.max(0, Math.floor(Number(state.skills?.efficiency || 0))),
+        speed: Math.max(0, Math.floor(Number(state.skills?.speed || 0))),
+        luck: Math.max(0, Math.floor(Number(state.skills?.luck || 0))),
+        charisma: Math.max(0, Math.floor(Number(state.skills?.charisma || 0)))
+      },
+      totalEarned: Math.max(0, Number(state.totalEarned || 0)),
+      upgrades: shallowClone(state.upgrades) || {},
+
+      ownedBusinesses: exportOwnedBusinessesForSave(100),
+      casinoStats: {
+        wins: Math.max(0, Math.floor(Number(state.casinoStats?.wins || 0))),
+        losses: Math.max(0, Math.floor(Number(state.casinoStats?.losses || 0)))
+      },
+
+      lastDailyBonusAt: finiteOrNull(state.lastDailyBonusAt),
+      lastInterestAt: finiteOrNull(state.lastInterestAt),
+
+      passiveCapWindowStart: finiteOrNull(state.passiveCapWindowStart) || now,
+      passiveEarnedInWindow: Math.max(0, Number(state.passiveEarnedInWindow || 0)),
+      powerPurchaseWindow: (Array.isArray(state.powerPurchaseWindow) ? state.powerPurchaseWindow : [])
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value))
+        .slice(-12)
+    };
+
+    if (estimatePayloadSize(nextState) > 250000) {
+      nextState.txLog = exportTxLogForSave(8);
+      nextState.orders = exportOrdersForSave(4, true);
+    }
+    if (estimatePayloadSize(nextState) > 400000) {
+      nextState.orders = exportOrdersForSave(3, false);
+    }
+    if (estimatePayloadSize(nextState) > 550000) {
+      nextState.txLog = exportTxLogForSave(5);
+      nextState.orders = exportOrdersForSave(1, false);
+    }
+
+    return nextState;
+  }
+
   function exportGameStateForSave() {
-    return JSON.parse(JSON.stringify(state));
+    return buildCloudSaveState();
   }
 
   function saveLocalState() {
@@ -1077,6 +1356,7 @@
     requestSave(reason = "state-change") {
       const now = Date.now();
       console.count("SAVE_CALLED");
+      backoffAttemptCount = 0;
       if (!saveTraceLogged) {
         saveTraceLogged = true;
         console.trace("SAVE_TRACE");
@@ -1097,6 +1377,7 @@
         setSaveStatus("saved", "local");
         return;
       }
+      backoffAttemptCount = 0;
       preparePendingSavePayload(reason);
       await flushCloudSave(true, reason);
     }
@@ -1261,10 +1542,7 @@
         serverReachable = false;
         const detail = err?.code || err?.message || "server-save-failed";
         if (isRateLimitError(err)) {
-          backoffAttemptCount += 1;
-          nextCloudSaveAllowedAt = Date.now() + computeBackoffDelayMs();
-          setSaveStatus("offline", "backoff");
-          logSaveEvent("rate-limited", { reason, detail, retryInMs: nextCloudSaveAllowedAt - Date.now() });
+          registerRateLimit(reason, detail);
           return;
         }
         setSaveStatus(
@@ -1299,12 +1577,9 @@
           cloudDirty = true;
           const detail = err?.code || err?.message || "cloud-save-failed";
           if (isRateLimitError(err)) {
-            backoffAttemptCount += 1;
-            nextCloudSaveAllowedAt = Date.now() + computeBackoffDelayMs();
-            setSaveStatus("offline", "backoff");
-            logSaveEvent("rate-limited", { reason, detail, retryInMs: nextCloudSaveAllowedAt - Date.now() });
+            registerRateLimit(reason, detail);
             saveInFlight = false;
-            if (cloudDirty) scheduleAutosave(reason);
+            if (cloudDirty && nextCloudSaveAllowedAt) scheduleAutosave(reason);
             return;
           }
           setSaveStatus(
@@ -1348,10 +1623,7 @@
       cloudDirty = true;
       const detail = err?.code || err?.message || "unknown";
       if (isRateLimitError(err)) {
-        backoffAttemptCount += 1;
-        nextCloudSaveAllowedAt = Date.now() + computeBackoffDelayMs();
-        setSaveStatus("offline", "backoff");
-        logSaveEvent("rate-limited", { reason, detail, retryInMs: nextCloudSaveAllowedAt - Date.now() });
+        registerRateLimit(reason, detail);
         return;
       }
       setSaveStatus(
@@ -1375,6 +1647,10 @@
       return;
     }
     if ((!firebaseReady || !currentUid) && !hasServerSession()) {
+      return;
+    }
+    if (backoffAttemptCount > MAX_AUTOMATIC_RATE_RETRIES) {
+      setSaveStatus("error", "rate-limited; waiting for next change");
       return;
     }
     if (!navigator.onLine) {
@@ -1750,7 +2026,7 @@
       }
     }
 
-    if (hasServerSession()) {
+    if (hasServerSession() && !(firebaseReady && currentUid && auth?.currentUser)) {
       try {
         await flushServerMirrorSave();
       } catch (err) {
@@ -3262,17 +3538,19 @@
         password: serverSession.password
       });
       serverOrders = Array.isArray(data.orders) ? data.orders : [];
-      const progressResp = await postJson("/api/progress/load", {
-        username: serverSession.username,
-        password: serverSession.password
-      });
-      if (progressResp?.progress && typeof progressResp.progress === "object") {
-        const progress = progressResp.progress;
-        if (typeof progress.bankBalance === "number") state.bankBalance = progress.bankBalance;
-        if (progress.inventory && typeof progress.inventory === "object") state.inventory = progress.inventory;
-        if (typeof progress.totalEarned === "number") state.totalEarned = progress.totalEarned;
-        if (progress.upgrades && typeof progress.upgrades === "object") state.upgrades = progress.upgrades;
-        if (progress.ownedBusinesses && typeof progress.ownedBusinesses === "object") state.ownedBusinesses = progress.ownedBusinesses;
+      if (!(firebaseReady && currentUid && auth?.currentUser)) {
+        const progressResp = await postJson("/api/progress/load", {
+          username: serverSession.username,
+          password: serverSession.password
+        });
+        if (progressResp?.progress && typeof progressResp.progress === "object") {
+          const progress = progressResp.progress;
+          if (typeof progress.bankBalance === "number") state.bankBalance = progress.bankBalance;
+          if (progress.inventory && typeof progress.inventory === "object") state.inventory = progress.inventory;
+          if (typeof progress.totalEarned === "number") state.totalEarned = progress.totalEarned;
+          if (progress.upgrades && typeof progress.upgrades === "object") state.upgrades = progress.upgrades;
+          if (progress.ownedBusinesses && typeof progress.ownedBusinesses === "object") state.ownedBusinesses = progress.ownedBusinesses;
+        }
       }
       serverReachable = true;
     } catch {
