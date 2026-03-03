@@ -470,10 +470,10 @@
     sessionStorage.removeItem("server_shop_password");
   }
 
-  async function postJson(url, payload) {
+  async function postJson(url, payload, extraHeaders = {}) {
     const resp = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...extraHeaders },
       body: JSON.stringify(payload)
     });
     const data = await resp.json().catch(() => ({}));
@@ -483,6 +483,10 @@
       throw err;
     }
     return data;
+  }
+
+  function isHostedContext() {
+    return window.location.protocol === "http:" || window.location.protocol === "https:";
   }
 
   function encodeFirestoreValue(value) {
@@ -544,6 +548,17 @@
     };
   }
 
+  async function getAuthApiHeaders() {
+    if (!firebaseReady || !auth?.currentUser) {
+      const err = new Error("unauthenticated");
+      err.code = "unauthenticated";
+      throw err;
+    }
+    return {
+      Authorization: `Bearer ${await auth.currentUser.getIdToken()}`
+    };
+  }
+
   function getFirestoreDocumentUrl(path) {
     const projectId = window.FIREBASE_CONFIG?.projectId;
     if (!projectId) {
@@ -555,6 +570,19 @@
   }
 
   async function restLoadUserDocument(uid) {
+    if (isHostedContext()) {
+      try {
+        const data = await postJson("/api/progress/load", { uid }, await getAuthApiHeaders());
+        if (data && Object.prototype.hasOwnProperty.call(data, "document")) {
+          return data.document || null;
+        }
+      } catch (err) {
+        if (err?.status && err.status !== 404) {
+          // Fall back to direct Firestore REST only when the same-origin proxy fails.
+        }
+      }
+    }
+
     const headers = await getFirestoreRestHeaders();
     const resp = await fetch(getFirestoreDocumentUrl(`users/${uid}`), {
       method: "GET",
@@ -571,6 +599,20 @@
   }
 
   async function restSaveUserDocument(uid, gameState) {
+    if (isHostedContext()) {
+      try {
+        return await postJson("/api/progress/save", {
+          uid,
+          username: usernameFromUser(auth.currentUser),
+          email: auth.currentUser?.email || "",
+          balance: Number(gameState.bankBalance || 0),
+          gameState
+        }, await getAuthApiHeaders());
+      } catch (err) {
+        // Fall back to direct Firestore REST only when the same-origin proxy fails.
+      }
+    }
+
     const headers = await getFirestoreRestHeaders();
     const username = usernameFromUser(auth.currentUser);
     const body = {
@@ -924,7 +966,17 @@
         setSaveStatus("saved", "cloud");
         return;
       } catch (err) {
-        // Fall through to SDK save if the REST path fails.
+        // On hosted deployments, the same-origin proxy already attempted the save path
+        // and direct REST fallback. Do not drop into the SDK timeout path.
+        if (isHostedContext()) {
+          cloudDirty = true;
+          setSaveStatus(
+            navigator.onLine ? "error" : "offline",
+            err?.code || err?.message || "cloud-save-failed"
+          );
+          return;
+        }
+        // Fall through to SDK save only in local/test contexts.
         if (!firebaseReady) {
           cloudDirty = true;
           setSaveStatus("error", err?.code || err?.message || "rest-save-failed");
