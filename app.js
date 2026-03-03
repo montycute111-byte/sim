@@ -688,6 +688,27 @@
   }
 
   async function loadUserGameState(uid) {
+    if (hasServerSession()) {
+      try {
+        const progressResp = await withTimeout(
+          postJson("/api/progress/load", {
+            username: serverSession.username,
+            password: serverSession.password
+          }),
+          5000,
+          "server-load-timeout"
+        );
+        if (progressResp?.progress && typeof progressResp.progress === "object") {
+          replaceState(migrateState(progressResp.progress));
+          saveLocalState();
+          setSaveStatus("saved", "server");
+          return;
+        }
+      } catch {
+        // Fall through to Firestore if the server-side progress endpoint is unavailable.
+      }
+    }
+
     if (!firebaseReady || !uid) return;
     const userRef = firebaseApi.doc(db, "users", uid);
     const snap = await firebaseApi.getDoc(userRef);
@@ -736,6 +757,34 @@
       setSaveStatus("saved", "local");
       return;
     }
+
+    if (hasServerSession()) {
+      setSaveStatus("saving");
+      try {
+        await withTimeout(
+          postJson("/api/progress/save", {
+            username: serverSession.username,
+            password: serverSession.password,
+            progress: exportGameStateForSave()
+          }),
+          5000,
+          "server-save-timeout"
+        );
+        cloudDirty = false;
+        serverReachable = true;
+        saveLocalState();
+        setSaveStatus("saved", "server");
+
+        if (firebaseReady && currentUid) {
+          saveUserGameState(currentUid, exportGameStateForSave()).catch(() => {});
+        }
+        return;
+      } catch {
+        serverReachable = false;
+        // Fall through to Firestore save if the server-side progress endpoint is unavailable.
+      }
+    }
+
     if (!firebaseReady || !currentUid || !cloudDirty || saveInFlight) return;
     saveInFlight = true;
     cloudDirty = false;
