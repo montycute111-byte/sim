@@ -485,6 +485,7 @@
     if (!resp.ok) {
       const err = new Error(data?.error || `Request failed (${resp.status})`);
       err.status = resp.status;
+      err.code = data?.code || data?.error || `http-${resp.status}`;
       throw err;
     }
     return data;
@@ -583,13 +584,9 @@
             return data.document || null;
           }
         } catch (err) {
-          if (err?.status && err.status !== 404) {
-            // Fall through to the username/password proxy path.
-          }
+          // Skip the username/password proxy when the authenticated save path exists.
         }
-      }
-
-      if (hasServerSession()) {
+      } else if (hasServerSession()) {
         try {
           const data = await postJson("/api/progress/load", {
             username: serverSession.username,
@@ -633,11 +630,9 @@
             gameState
           }, await getAuthApiHeaders());
         } catch (err) {
-          // Fall through to the username/password proxy path.
+          // Skip the username/password proxy when the authenticated save path exists.
         }
-      }
-
-      if (hasServerSession()) {
+      } else if (hasServerSession()) {
         try {
           return await postJson("/api/progress/save", {
             username: serverSession.username,
