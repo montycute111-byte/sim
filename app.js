@@ -477,6 +477,131 @@
     return data;
   }
 
+  function encodeFirestoreValue(value) {
+    if (value === null || value === undefined) return { nullValue: null };
+    if (Array.isArray(value)) {
+      return { arrayValue: { values: value.map((item) => encodeFirestoreValue(item)) } };
+    }
+    const type = typeof value;
+    if (type === "string") return { stringValue: value };
+    if (type === "boolean") return { booleanValue: value };
+    if (type === "number") {
+      if (!Number.isFinite(value)) return { nullValue: null };
+      if (Number.isInteger(value)) return { integerValue: String(value) };
+      return { doubleValue: value };
+    }
+    if (type === "object") {
+      const fields = {};
+      for (const [key, entry] of Object.entries(value)) {
+        fields[key] = encodeFirestoreValue(entry);
+      }
+      return { mapValue: { fields } };
+    }
+    return { stringValue: String(value) };
+  }
+
+  function decodeFirestoreValue(value) {
+    if (!value || typeof value !== "object") return null;
+    if ("nullValue" in value) return null;
+    if ("stringValue" in value) return value.stringValue;
+    if ("booleanValue" in value) return Boolean(value.booleanValue);
+    if ("integerValue" in value) return Number(value.integerValue);
+    if ("doubleValue" in value) return Number(value.doubleValue);
+    if ("timestampValue" in value) return Date.parse(value.timestampValue);
+    if ("arrayValue" in value) {
+      const items = Array.isArray(value.arrayValue?.values) ? value.arrayValue.values : [];
+      return items.map((item) => decodeFirestoreValue(item));
+    }
+    if ("mapValue" in value) {
+      const fields = value.mapValue?.fields || {};
+      const out = {};
+      for (const [key, entry] of Object.entries(fields)) {
+        out[key] = decodeFirestoreValue(entry);
+      }
+      return out;
+    }
+    return null;
+  }
+
+  async function getFirestoreRestHeaders() {
+    if (!firebaseReady || !auth?.currentUser) {
+      const err = new Error("unauthenticated");
+      err.code = "unauthenticated";
+      throw err;
+    }
+    const token = await auth.currentUser.getIdToken();
+    return {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    };
+  }
+
+  function getFirestoreDocumentUrl(path) {
+    const projectId = window.FIREBASE_CONFIG?.projectId;
+    if (!projectId) {
+      const err = new Error("missing-project-id");
+      err.code = "missing-project-id";
+      throw err;
+    }
+    return `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/${path}`;
+  }
+
+  async function restLoadUserDocument(uid) {
+    const headers = await getFirestoreRestHeaders();
+    const resp = await fetch(getFirestoreDocumentUrl(`users/${uid}`), {
+      method: "GET",
+      headers
+    });
+    if (resp.status === 404) return null;
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      const err = new Error(data?.error?.message || `rest-load-failed-${resp.status}`);
+      err.code = data?.error?.status || `rest-load-${resp.status}`;
+      throw err;
+    }
+    return data;
+  }
+
+  async function restSaveUserDocument(uid, gameState) {
+    const headers = await getFirestoreRestHeaders();
+    const username = usernameFromUser(auth.currentUser);
+    const body = {
+      fields: {
+        email: encodeFirestoreValue(auth.currentUser?.email || ""),
+        username: encodeFirestoreValue(username),
+        usernameLower: encodeFirestoreValue(username),
+        displayName: encodeFirestoreValue(username),
+        updatedAt: encodeFirestoreValue(Date.now()),
+        lastActiveAt: encodeFirestoreValue(Date.now()),
+        balance: encodeFirestoreValue(Number(gameState.bankBalance || 0)),
+        gameState: encodeFirestoreValue(gameState)
+      }
+    };
+    const params = new URLSearchParams();
+    [
+      "email",
+      "username",
+      "usernameLower",
+      "displayName",
+      "updatedAt",
+      "lastActiveAt",
+      "balance",
+      "gameState"
+    ].forEach((fieldPath) => params.append("updateMask.fieldPaths", fieldPath));
+    const resp = await fetch(`${getFirestoreDocumentUrl(`users/${uid}`)}?${params.toString()}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify(body)
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      const err = new Error(data?.error?.message || `rest-save-failed-${resp.status}`);
+      err.code = data?.error?.status || `rest-save-${resp.status}`;
+      throw err;
+    }
+    return data;
+  }
+
   function getDefaultState() {
     const now = Date.now();
     return {
@@ -688,24 +813,25 @@
   }
 
   async function loadUserGameState(uid) {
-    if (hasServerSession()) {
+    if (firebaseReady && auth?.currentUser) {
       try {
-        const progressResp = await withTimeout(
-          postJson("/api/progress/load", {
-            username: serverSession.username,
-            password: serverSession.password
-          }),
+        const restDoc = await withTimeout(
+          restLoadUserDocument(uid),
           5000,
-          "server-load-timeout"
+          "rest-load-timeout"
         );
-        if (progressResp?.progress && typeof progressResp.progress === "object") {
-          replaceState(migrateState(progressResp.progress));
+        if (restDoc?.fields) {
+          const gameState = decodeFirestoreValue(restDoc.fields.gameState);
+          const loaded = migrateState(gameState || {});
+          const balance = decodeFirestoreValue(restDoc.fields.balance);
+          if (Number.isFinite(balance)) loaded.bankBalance = Number(balance);
+          replaceState(loaded);
           saveLocalState();
-          setSaveStatus("saved", "server");
+          setSaveStatus("saved", "cloud");
           return;
         }
       } catch {
-        // Fall through to Firestore if the server-side progress endpoint is unavailable.
+        // Fall through to SDK load if the REST path fails.
       }
     }
 
@@ -758,30 +884,25 @@
       return;
     }
 
-    if (hasServerSession()) {
+    if (firebaseReady && currentUid && auth?.currentUser) {
       setSaveStatus("saving");
       try {
         await withTimeout(
-          postJson("/api/progress/save", {
-            username: serverSession.username,
-            password: serverSession.password,
-            progress: exportGameStateForSave()
-          }),
+          restSaveUserDocument(currentUid, exportGameStateForSave()),
           5000,
-          "server-save-timeout"
+          "rest-save-timeout"
         );
         cloudDirty = false;
-        serverReachable = true;
         saveLocalState();
-        setSaveStatus("saved", "server");
-
-        if (firebaseReady && currentUid) {
-          saveUserGameState(currentUid, exportGameStateForSave()).catch(() => {});
-        }
+        setSaveStatus("saved", "cloud");
         return;
-      } catch {
-        serverReachable = false;
-        // Fall through to Firestore save if the server-side progress endpoint is unavailable.
+      } catch (err) {
+        // Fall through to SDK save if the REST path fails.
+        if (!firebaseReady) {
+          cloudDirty = true;
+          setSaveStatus("error", err?.code || err?.message || "rest-save-failed");
+          return;
+        }
       }
     }
 
